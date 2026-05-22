@@ -4,17 +4,46 @@ import json
 import os
 from pathlib import Path
 
-from .provider import LibraVDBMemoryProvider, _get_hermes_home, _resolve_endpoint, _load_secret, _GrpcChannel
+from .provider import (
+    LibraVDBMemoryProvider,
+    _get_hermes_home,
+    _resolve_endpoint,
+    _load_secret,
+    _resolve_transport_config,
+    _GrpcChannel,
+)
 from .identity import resolve_identity
 from .scopes import user_collection, resolve_search_scopes
 from libravdb.ipc.v1 import rpc_pb2 as pb
 
 
-def _cli_health() -> dict:
-    channel = _GrpcChannel(
-        endpoint=_resolve_endpoint(),
-        secret=_load_secret(),
+def _load_cli_config() -> dict:
+    """Load plugin config for CLI usage (reads libravdb.json if it exists)."""
+    config_path = _get_hermes_home() / "libravdb.json"
+    if not config_path.exists():
+        return {}
+    try:
+        return json.loads(config_path.read_text())
+    except Exception:
+        return {}
+
+
+def _create_cli_channel() -> _GrpcChannel:
+    """Create a gRPC channel from plugin config for CLI commands."""
+    transport = _resolve_transport_config(_load_cli_config())
+    return _GrpcChannel(
+        endpoint=transport["endpoint"],
+        secret=transport["secret"],
+        timeout_ms=transport["timeout_ms"],
+        tls_mode=transport["tls_mode"],
+        tls_ca_path=transport["tls_ca_path"],
+        tls_client_cert_path=transport["tls_client_cert_path"],
+        tls_client_key_path=transport["tls_client_key_path"],
     )
+
+
+def _cli_health() -> dict:
+    channel = _create_cli_channel()
     try:
         resp = channel.health()
         channel.close()
@@ -25,10 +54,7 @@ def _cli_health() -> dict:
 
 
 def _cli_status() -> dict:
-    channel = _GrpcChannel(
-        endpoint=_resolve_endpoint(),
-        secret=_load_secret(),
-    )
+    channel = _create_cli_channel()
     try:
         resp = channel._call("Status", pb.MemoryStatusRequest())
         channel.close()
@@ -60,10 +86,7 @@ def _cli_list_collections(channel, collection_patterns: list[str]) -> list[dict]
 
 
 def _cli_status_deep(rebuild_index: bool = False) -> dict:
-    channel = _GrpcChannel(
-        endpoint=_resolve_endpoint(),
-        secret=_load_secret(),
-    )
+    channel = _create_cli_channel()
     identity = resolve_identity()
     resolved_user_id = identity.user_id
     try:
@@ -144,16 +167,16 @@ def libravdb_command(args) -> None:
         return
 
     if subcommand == "search":
-        channel = _GrpcChannel(
-            endpoint=_resolve_endpoint(),
-            secret=_load_secret(),
-        )
+        channel = _create_cli_channel()
+        config = _load_cli_config()
         identity = resolve_identity()
-        k = int(args.limit or 8)
+        k = int(args.limit or config.get("topK", 8))
         collections = resolve_search_scopes(
             user_id=identity.user_id,
             session_id=None,  # CLI searches across user+global (no session)
-            cross_session_recall=True,
+            cross_session_recall=config.get("crossSessionRecall", True),
+            use_session_summary_search=config.get("useSessionSummarySearchExperiment", False),
+            use_session_recall_projection=config.get("useSessionRecallProjection", False),
         )
         try:
             if len(collections) == 1:
@@ -192,7 +215,7 @@ def libravdb_command(args) -> None:
             input("Press Enter to confirm: ")
         except EOFError:
             pass
-        channel = _GrpcChannel(endpoint=_resolve_endpoint(), secret=_load_secret())
+        channel = _create_cli_channel()
         try:
             resp = channel._call("FlushNamespace", pb.FlushNamespaceRequest(user_id=user_id, namespace=""))
             channel.close()
@@ -207,7 +230,7 @@ def libravdb_command(args) -> None:
         if not user_id:
             print(json.dumps({"error": "--user-id is required"}))
             return
-        channel = _GrpcChannel(endpoint=_resolve_endpoint(), secret=_load_secret())
+        channel = _create_cli_channel()
         try:
             resp = channel._call("ExportMemory", pb.ExportMemoryRequest(user_id=user_id, namespace=""))
             channel.close()
@@ -231,7 +254,7 @@ def libravdb_command(args) -> None:
         if not session_id:
             print(json.dumps({"error": "--session-id is required"}))
             return
-        channel = _GrpcChannel(endpoint=_resolve_endpoint(), secret=_load_secret())
+        channel = _create_cli_channel()
         try:
             resp = channel._call("ListLifecycleJournal", pb.ListLifecycleJournalRequest(session_id=session_id, limit=limit))
             channel.close()
@@ -260,7 +283,7 @@ def libravdb_command(args) -> None:
         except Exception as e:
             print(json.dumps({"error": f"Cannot read file: {e}"}))
             return
-        channel = _GrpcChannel(endpoint=_resolve_endpoint(), secret=_load_secret())
+        channel = _create_cli_channel()
         try:
             resp = channel._call(
                 "PromoteDreamEntries",

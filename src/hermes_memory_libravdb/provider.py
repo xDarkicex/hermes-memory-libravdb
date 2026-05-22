@@ -25,11 +25,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TOP_K = 8
 DEFAULT_MIN_SCORE = 0.35
+DEFAULT_RPC_TIMEOUT_MS = 30000
 
 # Ingest queue defaults
 _INGEST_CHUNK_TOKENS = 8192
 _INGEST_RETRY_BASE_DELAY_MS = 500
 _INGEST_MAX_RETRIES = 4
+
+VALID_TLS_MODES = frozenset({"auto", "tls", "insecure"})
 
 
 def _get_hermes_home() -> Path:
@@ -62,11 +65,47 @@ def _is_loopback_host(host: str) -> bool:
     return host.lower() in ("localhost", "127.0.0.1", "::1")
 
 
+def _resolve_transport_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract transport-level config from the plugin config dict.
+
+    Maps TypeScript plugin config keys to the internal gRPC channel params.
+    """
+    tls_mode = config.get("grpcEndpointTlsMode")
+    if tls_mode is not None and tls_mode not in VALID_TLS_MODES:
+        raise ValueError(
+            f"Invalid grpcEndpointTlsMode {tls_mode!r} — "
+            f"must be 'auto', 'tls', or 'insecure'"
+        )
+
+    has_cert = bool(config.get("grpcEndpointTlsClientCert"))
+    has_key = bool(config.get("grpcEndpointTlsClientKey"))
+    if has_cert != has_key:
+        raise ValueError(
+            "grpcEndpointTlsClientCert and grpcEndpointTlsClientKey "
+            "must both be set or both be omitted"
+        )
+
+    return {
+        "endpoint": _resolve_endpoint(config.get("grpcEndpoint") or config.get("endpoint")),
+        "secret": _load_secret(),
+        "timeout_ms": int(config.get("rpcTimeoutMs", DEFAULT_RPC_TIMEOUT_MS)),
+        "tls_mode": tls_mode,
+        "tls_ca_path": config.get("grpcEndpointTlsCa"),
+        "tls_client_cert_path": config.get("grpcEndpointTlsClientCert"),
+        "tls_client_key_path": config.get("grpcEndpointTlsClientKey"),
+    }
+
+
 class _NonceState:
     def __init__(self, secret: str | None):
         self._secret = secret
         self._nonce: str | None = None
-        self._recovering = False
+
+    def has_secret(self) -> bool:
+        return bool(self._secret)
+
+    def has_nonce(self) -> bool:
+        return bool(self._nonce)
 
     def should_sign(self, method_name: str) -> bool:
         return bool(self._secret and self._nonce and method_name != "Health")
@@ -91,34 +130,82 @@ class _NonceState:
         ]
 
 
+def _resolve_tls_mode(endpoint: str, tls_mode: str | None) -> str:
+    """Resolve effective TLS mode: ``auto``, ``tls``, or ``insecure``."""
+    if tls_mode == "tls":
+        return "tls"
+    if tls_mode == "insecure":
+        return "insecure"
+    # auto: unix sockets and loopback hosts are insecure, remote uses TLS
+    if endpoint.startswith("unix:"):
+        return "insecure"
+    target = endpoint.replace("tcp:", "")
+    host = target.split(":")[0] if ":" in target else target
+    if host.lower() in ("localhost", "127.0.0.1", "::1"):
+        return "insecure"
+    return "tls"
+
+
+def _read_pem_file(path: str | None) -> bytes | None:
+    """Read a PEM file, returning ``None`` if the path is empty or unreadable."""
+    if not path:
+        return None
+    try:
+        return Path(path).read_bytes()
+    except Exception:
+        return None
+
+
 class _GrpcChannel:
     def __init__(
         self,
         endpoint: str,
         secret: str | None,
-        timeout_ms: int = 30000,
+        timeout_ms: int = DEFAULT_RPC_TIMEOUT_MS,
+        *,
+        tls_mode: str | None = None,
+        tls_ca_path: str | None = None,
+        tls_client_cert_path: str | None = None,
+        tls_client_key_path: str | None = None,
     ):
         self._endpoint = endpoint
         self._secret = secret
         self._timeout_ms = timeout_ms
+        self._tls_mode = tls_mode
+        self._tls_ca_path = tls_ca_path
+        self._tls_client_cert_path = tls_client_cert_path
+        self._tls_client_key_path = tls_client_key_path
         self._channel: grpc.Channel | None = None
         self._stub: services.LibravDBStub | None = None
         self._nonce_state = _NonceState(secret)
-        self._rpc_lock = threading.Lock()
+        self._rpc_mutex = threading.Lock()
         self._closed = False
+
+    # ── channel creation ──────────────────────────────────────────────────
 
     def _create_channel(self) -> grpc.Channel:
         is_unix = self._endpoint.startswith("unix:")
         target = self._endpoint[5:] if is_unix else self._endpoint.replace("tcp:", "")
+        cred_mode = _resolve_tls_mode(self._endpoint, self._tls_mode)
+        use_tls = not is_unix and cred_mode != "insecure"
 
         if is_unix:
+            return grpc.insecure_channel(f"unix:{target}")
+
+        if not use_tls:
             return grpc.insecure_channel(target)
 
-        host = target.split(":")[0] if ":" in target else target
-        if _is_loopback_host(host):
-            return grpc.insecure_channel(target)
+        # Build TLS credentials
+        root_certs = _read_pem_file(self._tls_ca_path)
+        private_key = _read_pem_file(self._tls_client_key_path)
+        cert_chain = _read_pem_file(self._tls_client_cert_path)
 
-        return grpc.ssl_channel_credentials()
+        creds = grpc.ssl_channel_credentials(
+            root_certificates=root_certs,
+            private_key=private_key,
+            certificate_chain=cert_chain,
+        )
+        return grpc.secure_channel(target, creds)
 
     def _get_stub(self) -> services.LibravDBStub:
         if self._stub is None:
@@ -126,33 +213,86 @@ class _GrpcChannel:
             self._stub = services.LibravDBStub(self._channel)
         return self._stub
 
+    # ── nonce bootstrap (called inside rpc_mutex) ─────────────────────────
+
+    def _bootstrap_nonce_locked(self) -> None:
+        """
+        Call Health directly on the stub to obtain a fresh nonce.
+
+        Must be called inside ``_rpc_mutex``.  Bypasses :meth:`_call` to avoid
+        deadlocking on the very mutex we already hold.
+        """
+        try:
+            stub = self._get_stub()
+            resp = stub.Health(
+                pb.HealthRequest(),
+                timeout=self._timeout_ms / 1000,
+            )
+            metadata = resp.initial_metadata()
+            nonce = metadata.get("x-libravdb-nonce") if metadata else None
+            if nonce:
+                self._nonce_state.update_nonce(nonce)
+            else:
+                logger.warning(
+                    "LibraVDB handshake returned no nonce — auth may be disabled"
+                )
+        except Exception as exc:
+            logger.debug("LibraVDB nonce bootstrap failed: %s", exc)
+
+    # ── RPC dispatch ──────────────────────────────────────────────────────
+
     def _call(self, method_name: str, req) -> Any:
         if self._closed:
             raise RuntimeError("Channel is closed")
-        with self._rpc_lock:
-            metadata = self._nonce_state.build_metadata(method_name)
-            try:
-                stub = self._get_stub()
-                method = getattr(stub, method_name)
-                resp = method(req, metadata=metadata, timeout=self._timeout_ms / 1000)
-                self._update_nonce_from_response(resp, method_name)
-                return resp
-            except grpc.RpcError as e:
-                self._nonce_state.update_nonce(None)
-                raise
 
-    def _update_nonce_from_response(self, resp, method_name: str):
+        # Health always runs outside the mutex to avoid deadlocking with
+        # _bootstrap_nonce_locked which itself calls Health directly.
+        if method_name == "Health":
+            return self._call_health(req)
+
+        self._rpc_mutex.acquire()
+        try:
+            # Auto-recover nonce inside the lock so queued callers wait
+            if self._nonce_state.has_secret() and not self._nonce_state.has_nonce():
+                self._bootstrap_nonce_locked()
+                if not self._nonce_state.has_nonce():
+                    raise RuntimeError(
+                        "LibraVDB: bootstrap handshake did not return a nonce"
+                    )
+
+            metadata = self._nonce_state.build_metadata(method_name)
+            stub = self._get_stub()
+            method = getattr(stub, method_name)
+            resp = method(req, metadata=metadata, timeout=self._timeout_ms / 1000)
+            self._update_nonce_from_response(resp)
+            return resp
+        except grpc.RpcError:
+            if self._nonce_state.has_secret() and self._nonce_state.has_nonce():
+                self._nonce_state.update_nonce(None)
+            raise
+        finally:
+            self._rpc_mutex.release()
+
+    def _call_health(self, req) -> Any:
+        """Health RPC — bypasses the mutex, serves as the nonce bootstrap path."""
+        try:
+            stub = self._get_stub()
+            resp = stub.Health(req, timeout=self._timeout_ms / 1000)
+            self._update_nonce_from_response(resp)
+            return resp
+        except grpc.RpcError:
+            raise
+
+    def _update_nonce_from_response(self, resp):
         try:
             metadata = resp.initial_metadata()
             nonce = metadata.get("x-libravdb-nonce") if metadata else None
             if nonce:
                 self._nonce_state.update_nonce(nonce)
-            elif method_name == "Health" and not self._nonce_state.get_nonce():
-                logger.warning("No x-libravdb-nonce in Health response — auth may be disabled on this server")
         except Exception:
             pass
 
-    async def health(self) -> pb.HealthResponse:
+    def health(self) -> pb.HealthResponse:
         return self._call("Health", pb.HealthRequest())
 
     def close(self):
@@ -210,15 +350,78 @@ class LibraVDBMemoryProvider:
         )
         self._writes_enabled = str(kwargs.get("agent_context") or "primary") == "primary"
         self._startup_error = None
-        self._embedding_profile = self._config.get("embeddingProfile", "nomic-embed-text-v1.5")
-        self._fallback_profile = self._config.get("fallbackProfile", "bge-small-en-v1.5")
-        self._onnx_device = self._config.get("onnxDevice", "cpu")
-        self._cross_session_recall = self._config.get("crossSessionRecall", True)
-        self._compact_session_token_budget = int(self._config.get("compactSessionTokenBudget", 2000))
+
+        # ── Runtime config (ported from openclaw-memory-libravdb PluginConfig) ──
+        cfg = self._config
+        self._embedding_profile = cfg.get("embeddingProfile", "nomic-embed-text-v1.5")
+        self._fallback_profile = cfg.get("fallbackProfile", "bge-small-en-v1.5")
+        self._onnx_device = cfg.get("onnxDevice", "cpu")
+        self._cross_session_recall = cfg.get("crossSessionRecall", True)
+        self._use_session_recall_projection = cfg.get("useSessionRecallProjection", False)
+        self._use_session_summary_search = cfg.get("useSessionSummarySearchExperiment", False)
+        self._session_ttl = cfg.get("sessionTTL")
+        self._lifecycle_journal_max_entries = cfg.get("lifecycleJournalMaxEntries")
+        self._top_k = int(cfg.get("topK", DEFAULT_TOP_K))
+        self._alpha = cfg.get("alpha")
+        self._beta = cfg.get("beta")
+        self._gamma = cfg.get("gamma")
+        self._ingestion_gate_threshold = cfg.get("ingestionGateThreshold", 0.40)
+        self._recency_lambda_session = cfg.get("recencyLambdaSession")
+        self._recency_lambda_user = cfg.get("recencyLambdaUser", 0.40)
+        self._recency_lambda_global = cfg.get("recencyLambdaGlobal")
+        self._compact_session_token_budget = int(cfg.get("compactSessionTokenBudget", 2000))
+        self._compact_threshold = cfg.get("compactThreshold")
+        self._compaction_threshold_fraction = cfg.get("compactionThresholdFraction", 0.8)
+        self._compaction_quality_weight = cfg.get("compactionQualityWeight")
+        self._continuity_min_turns = int(cfg.get("continuityMinTurns", 4))
+        self._continuity_tail_budget_tokens = int(cfg.get("continuityTailBudgetTokens", 512))
+        self._continuity_prior_context_tokens = int(cfg.get("continuityPriorContextTokens", 1024))
+        self._token_budget_fraction = cfg.get("tokenBudgetFraction", 0.85)
+        self._authored_hard_budget_fraction = cfg.get("authoredHardBudgetFraction", 0.15)
+        self._authored_soft_budget_fraction = cfg.get("authoredSoftBudgetFraction", 0.10)
+        self._elevated_guidance_budget_fraction = cfg.get("elevatedGuidanceBudgetFraction", 0.05)
+        self._section7_theta1 = cfg.get("section7Theta1", 0.25)
+        self._section7_kappa = cfg.get("section7Kappa", 0.6)
+        self._section7_hop_eta = cfg.get("section7HopEta", 0.4)
+        self._section7_hop_threshold = cfg.get("section7HopThreshold", 0.65)
+        self._section7_coarse_top_k = int(cfg.get("section7CoarseTopK", 16))
+        self._section7_second_pass_top_k = int(cfg.get("section7SecondPassTopK", 8))
+        self._section7_authority_recency_lambda = cfg.get("section7AuthorityRecencyLambda", 0.4)
+        self._section7_authority_recency_weight = cfg.get("section7AuthorityRecencyWeight", 0.35)
+        self._section7_authority_frequency_weight = cfg.get("section7AuthorityFrequencyWeight", 0.25)
+        self._section7_authority_authored_weight = cfg.get("section7AuthorityAuthoredWeight", 0.40)
+        self._section7_authority_salience_weight = cfg.get("section7AuthoritySalienceWeight", 0.30)
+        self._section7_recency_access_lambda = cfg.get("section7RecencyAccessLambda", 0.5)
+        self._recovery_floor_score = cfg.get("recoveryFloorScore", 0.55)
+        self._recovery_min_top_k = int(cfg.get("recoveryMinTopK", 3))
+        self._recovery_min_confidence_mean = cfg.get("recoveryMinConfidenceMean", 0.25)
+        self._embedding_backend = cfg.get("embeddingBackend")
+        self._embedding_runtime_path = cfg.get("embeddingRuntimePath")
+        self._embedding_model_path = cfg.get("embeddingModelPath")
+        self._embedding_tokenizer_path = cfg.get("embeddingTokenizerPath")
+        self._embedding_dimensions = cfg.get("embeddingDimensions")
+        self._embedding_normalize = cfg.get("embeddingNormalize")
+        self._summarizer_backend = cfg.get("summarizerBackend")
+        self._summarizer_profile = cfg.get("summarizerProfile")
+        self._summarizer_runtime_path = cfg.get("summarizerRuntimePath")
+        self._summarizer_model_path = cfg.get("summarizerModelPath")
+        self._summarizer_tokenizer_path = cfg.get("summarizerTokenizerPath")
+        self._summarizer_model = cfg.get("summarizerModel")
+        self._summarizer_endpoint = cfg.get("summarizerEndpoint")
+        self._ollama_url = cfg.get("ollamaUrl")
+        self._compact_model = cfg.get("compactModel")
+        self._log_level = cfg.get("logLevel")
+
         try:
+            transport = _resolve_transport_config(cfg)
             self._channel = _GrpcChannel(
-                endpoint=self._endpoint,
-                secret=self._secret,
+                endpoint=transport["endpoint"],
+                secret=transport["secret"],
+                timeout_ms=transport["timeout_ms"],
+                tls_mode=transport["tls_mode"],
+                tls_ca_path=transport["tls_ca_path"],
+                tls_client_cert_path=transport["tls_client_cert_path"],
+                tls_client_key_path=transport["tls_client_key_path"],
             )
         except Exception as exc:
             self._startup_error = str(exc)
@@ -247,6 +450,8 @@ class LibraVDBMemoryProvider:
                 user_id=self.user_id,
                 session_id=session,
                 cross_session_recall=self._cross_session_recall,
+                use_session_summary_search=self._use_session_summary_search,
+                use_session_recall_projection=self._use_session_recall_projection,
             )
             if not collections:
                 return ""
@@ -254,13 +459,13 @@ class LibraVDBMemoryProvider:
                 resp = self._channel._call("SearchText", pb.SearchTextRequest(
                     collection=collections[0],
                     text=query,
-                    k=self._config.get("topK", DEFAULT_TOP_K),
+                    k=self._top_k,
                 ))
             else:
                 resp = self._channel._call("SearchTextCollections", pb.SearchTextCollectionsRequest(
                     collections=collections,
                     text=query,
-                    k=self._config.get("topK", DEFAULT_TOP_K),
+                    k=self._top_k,
                     exclude_by_collection={},
                 ))
             return self._format_prefetch(resp)
@@ -289,9 +494,9 @@ class LibraVDBMemoryProvider:
             channel=self._channel,
             user_id=self.user_id,
             session_id=session,
-            chunk_tokens=self._config.get("ingestChunkTokens", _INGEST_CHUNK_TOKENS),
-            retry_base_delay_ms=self._config.get("ingestRetryBaseDelayMs", _INGEST_RETRY_BASE_DELAY_MS),
-            max_retries=self._config.get("ingestMaxRetries", _INGEST_MAX_RETRIES),
+            chunk_tokens=int(self._config.get("ingestChunkTokens", _INGEST_CHUNK_TOKENS)),
+            retry_base_delay_ms=int(self._config.get("ingestRetryBaseDelayMs", _INGEST_RETRY_BASE_DELAY_MS)),
+            max_retries=int(self._config.get("ingestMaxRetries", _INGEST_MAX_RETRIES)),
         )
         threading.Thread(target=self._ingest_with_queue, args=(queue, user_content, assistant_content), daemon=True).start()
 
@@ -337,11 +542,13 @@ class LibraVDBMemoryProvider:
                 query = str(args.get("query") or "").strip()
                 if not query:
                     return json.dumps({"error": "Missing required argument: query"})
-                k = args.get("limit", self._config.get("topK", DEFAULT_TOP_K))
+                k = args.get("limit", self._top_k)
                 collections = resolve_search_scopes(
                     user_id=self.user_id,
                     session_id=self._session_id,
                     cross_session_recall=self._cross_session_recall,
+                    use_session_summary_search=self._use_session_summary_search,
+                    use_session_recall_projection=self._use_session_recall_projection,
                 )
                 if len(collections) == 1:
                     resp = self._channel._call("SearchText", pb.SearchTextRequest(
