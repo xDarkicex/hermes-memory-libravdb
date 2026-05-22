@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TOP_K = 8
 DEFAULT_MIN_SCORE = 0.35
 DEFAULT_RPC_TIMEOUT_MS = 30000
+STATUS_CACHE_TTL_SEC = 30
 
 # Ingest queue defaults
 _INGEST_CHUNK_TOKENS = 8192
@@ -315,6 +316,9 @@ class LibraVDBMemoryProvider:
         self._writes_enabled = True
         self._startup_error: str | None = None
         self._config = self._load_config()
+        # Cached daemon status fields (refreshed via _fetch_daemon_status)
+        self._cached_gating_threshold: float | None = None
+        self._status_fetched_at: float = 0.0
 
     def _load_config(self) -> Dict[str, Any]:
         config_path = self._hermes_home / "libravdb.json"
@@ -337,6 +341,79 @@ class LibraVDBMemoryProvider:
     def user_id(self) -> str:
         """Resolved stable user identity for collection naming."""
         return self._resolved_identity.user_id if self._resolved_identity else "default"
+
+    # ── daemon status cache ──────────────────────────────────────────────
+
+    def _fetch_daemon_status(self) -> dict:
+        """Fetch Status from daemon and cache gatingThreshold (with TTL)."""
+        now = time.monotonic()
+        if (
+            self._cached_gating_threshold is not None
+            and (now - self._status_fetched_at) < STATUS_CACHE_TTL_SEC
+        ):
+            return {"gatingThreshold": self._cached_gating_threshold}
+
+        if not self._channel:
+            return {}
+
+        try:
+            resp = self._channel._call("Status", pb.MemoryStatusRequest())
+            self._cached_gating_threshold = (
+                resp.gating_threshold if hasattr(resp, "gating_threshold") else None
+            )
+            self._status_fetched_at = now
+            return {"gatingThreshold": self._cached_gating_threshold}
+        except Exception:
+            return {}
+
+    # ── minScore resolution (matches OpenClaw fallback chain) ─────────────
+
+    def _resolve_min_score(self, explicit: float | None = None) -> float:
+        """Resolve minScore: explicit arg → daemon gatingThreshold → config ingestionGateThreshold → DEFAULT_MIN_SCORE."""
+        if explicit is not None:
+            return float(explicit)
+
+        status = self._fetch_daemon_status()
+        gt = status.get("gatingThreshold")
+        if gt is not None:
+            return float(gt)
+
+        igt = self._config.get("ingestionGateThreshold")
+        if igt is not None:
+            return float(igt)
+
+        return DEFAULT_MIN_SCORE
+
+    # ── search mode descriptor ────────────────────────────────────────────
+
+    def resolve_search_mode(self) -> dict:
+        """Return a dict describing the active search configuration (for status --deep)."""
+        cfg = self._config
+        threshold_source = "default"
+        effective = DEFAULT_MIN_SCORE
+
+        status = self._fetch_daemon_status()
+        gt = status.get("gatingThreshold")
+        if gt is not None:
+            threshold_source = "daemon"
+            effective = float(gt)
+        elif cfg.get("ingestionGateThreshold") is not None:
+            threshold_source = "config"
+            effective = float(cfg["ingestionGateThreshold"])
+
+        scope_mode = "session"
+        if cfg.get("useSessionSummarySearchExperiment"):
+            scope_mode = "session_summary"
+        elif cfg.get("useSessionRecallProjection"):
+            scope_mode = "session_recall"
+
+        return {
+            "crossSessionRecall": cfg.get("crossSessionRecall", True),
+            "scopeMode": scope_mode,
+            "topK": cfg.get("topK", DEFAULT_TOP_K),
+            "effectiveMinScore": effective,
+            "thresholdSource": threshold_source,
+        }
 
     def initialize(self, session_id: str, **kwargs) -> None:
         self._session_id = session_id
@@ -468,7 +545,9 @@ class LibraVDBMemoryProvider:
                     k=self._top_k,
                     exclude_by_collection={},
                 ))
-            return self._format_prefetch(resp)
+            min_score = self._resolve_min_score()
+            results = [r for r in resp.results if r.score >= min_score]
+            return self._format_prefetch_from_results(results)
         except Exception as exc:
             logger.debug("LibraVDB prefetch failed: %s", exc)
             return ""
@@ -563,10 +642,15 @@ class LibraVDBMemoryProvider:
                         k=k,
                         exclude_by_collection={},
                     ))
-                results = [self._result_to_dict(r) for r in resp.results]
-                min_score = args.get("min_score")
-                if min_score is not None:
-                    results = [r for r in results if r["score"] >= float(min_score)]
+                explicit_min_score = args.get("min_score")
+                min_score = self._resolve_min_score(
+                    float(explicit_min_score) if explicit_min_score is not None else None
+                )
+                results = [
+                    self._result_to_dict(r)
+                    for r in resp.results
+                    if r.score >= min_score
+                ]
                 return json.dumps({"results": results})
             if tool_name == "libravdb_status":
                 resp = self._channel._call("Status", pb.MemoryStatusRequest())
@@ -576,7 +660,16 @@ class LibraVDBMemoryProvider:
             return json.dumps({"error": str(exc)})
 
     def _result_to_dict(self, r) -> dict:
-        return {"id": r.id, "score": r.score, "text": r.text}
+        result = {"id": r.id, "score": r.score, "text": r.text}
+        if hasattr(r, "metadata_json") and r.metadata_json:
+            try:
+                import json
+                meta = json.loads(r.metadata_json)
+                if isinstance(meta, dict):
+                    result["metadata"] = meta
+            except Exception:
+                pass
+        return result
 
     # TODO: implement
     def on_turn_start(self, turn: Any, message: Any, **kwargs) -> None:
@@ -635,11 +728,11 @@ class LibraVDBMemoryProvider:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(values, indent=2) + "\n")
 
-    def _format_prefetch(self, resp) -> str:
-        if not resp.results:
+    def _format_prefetch_from_results(self, results) -> str:
+        if not results:
             return ""
         lines = ["Relevant context from LibraVDB:"]
-        for r in resp.results:
+        for r in results:
             snippet = r.text[:120] + "..." if len(r.text) > 120 else r.text
             lines.append(f"- [score {r.score:.2f}] {snippet}")
         return "\n".join(lines)

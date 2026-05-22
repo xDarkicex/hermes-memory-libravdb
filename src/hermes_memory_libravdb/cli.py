@@ -42,6 +42,23 @@ def _create_cli_channel() -> _GrpcChannel:
     )
 
 
+def _resolve_cli_min_score(channel: _GrpcChannel, config: dict, explicit: float | None) -> float:
+    """Resolve minScore with OpenClaw fallback chain: explicit → daemon → config → 0.35."""
+    if explicit is not None:
+        return float(explicit)
+    try:
+        resp = channel._call("Status", pb.MemoryStatusRequest())
+        gt = getattr(resp, "gating_threshold", None)
+        if gt is not None:
+            return float(gt)
+    except Exception:
+        pass
+    igt = config.get("ingestionGateThreshold")
+    if igt is not None:
+        return float(igt)
+    return 0.35
+
+
 def _cli_health() -> dict:
     channel = _create_cli_channel()
     try:
@@ -55,6 +72,7 @@ def _cli_health() -> dict:
 
 def _cli_status() -> dict:
     channel = _create_cli_channel()
+    config = _load_cli_config()
     try:
         resp = channel._call("Status", pb.MemoryStatusRequest())
         channel.close()
@@ -63,10 +81,18 @@ def _cli_status() -> dict:
             "message": resp.message,
             "turn_count": resp.turn_count,
             "memory_count": resp.memory_count,
+            "lifecycle_hint_count": getattr(resp, "lifecycle_hint_count", None),
+            "gating_threshold": getattr(resp, "gating_threshold", None) or config.get("ingestionGateThreshold", 0.35),
+            "abstractive_ready": getattr(resp, "abstractive_ready", None),
+            "embedding_profile": getattr(resp, "embedding_profile", None),
         }
     except Exception as e:
         channel.close()
-        return {"ok": False, "error": str(e)}
+        return {
+            "ok": False,
+            "error": str(e),
+            "gating_threshold": config.get("ingestionGateThreshold", 0.35),
+        }
 
 
 def _cli_list_collections(channel, collection_patterns: list[str]) -> list[dict]:
@@ -126,12 +152,39 @@ def _cli_status_deep(rebuild_index: bool = False) -> dict:
             "global",
         ])
 
+        # Resolve search mode from config
+        config = _load_cli_config()
+        scope_mode = "session"
+        if config.get("useSessionSummarySearchExperiment"):
+            scope_mode = "session_summary"
+        elif config.get("useSessionRecallProjection"):
+            scope_mode = "session_recall"
+
+        threshold_source = "default"
+        effective_min_score = 0.35
+        daemon_gt = base.get("gating_threshold")
+        if daemon_gt is not None:
+            threshold_source = "daemon"
+            effective_min_score = float(daemon_gt)
+        elif config.get("ingestionGateThreshold") is not None:
+            threshold_source = "config"
+            effective_min_score = float(config["ingestionGateThreshold"])
+
+        search_mode = {
+            "crossSessionRecall": config.get("crossSessionRecall", True),
+            "scopeMode": scope_mode,
+            "topK": config.get("topK", 8),
+            "effectiveMinScore": effective_min_score,
+            "thresholdSource": threshold_source,
+        }
+
         channel.close()
 
         return {
             **base,
             "reindex_result": index_result,
             "collections": collections,
+            "search_mode": search_mode,
             "memory_provider_active": True,
             "context_engine_active": True,
         }
@@ -178,6 +231,9 @@ def libravdb_command(args) -> None:
             use_session_summary_search=config.get("useSessionSummarySearchExperiment", False),
             use_session_recall_projection=config.get("useSessionRecallProjection", False),
         )
+        # Resolve minScore: explicit --min-score → daemon gatingThreshold → config → default
+        explicit = getattr(args, "min_score", None)
+        min_score = _resolve_cli_min_score(channel, config, explicit)
         try:
             if len(collections) == 1:
                 resp = channel._call("SearchText", pb.SearchTextRequest(
@@ -195,9 +251,10 @@ def libravdb_command(args) -> None:
             results = [
                 {"id": r.id, "score": r.score, "text": r.text}
                 for r in resp.results
+                if r.score >= min_score
             ]
             if getattr(args, "json", False):
-                print(json.dumps({"results": results}, indent=2))
+                print(json.dumps({"results": results, "minScore": min_score, "topK": k}, indent=2))
             else:
                 for r in results:
                     print(f"[{r['score']:.2f}] {r['text'][:200]}")
@@ -331,6 +388,7 @@ def register_cli(subparser) -> None:
     search = subs.add_parser("search", help="Search memory")
     search.add_argument("query", help="Semantic search query")
     search.add_argument("--limit", help="Maximum results")
+    search.add_argument("--min-score", type=float, dest="min_score", help="Minimum semantic score threshold (default: daemon gating threshold, or config ingestionGateThreshold, or 0.35)")
     search.add_argument("--json", action="store_true", help="Print structured JSON")
     search.set_defaults(func=libravdb_command)
 
