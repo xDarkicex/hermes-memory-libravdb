@@ -13,6 +13,7 @@ from .provider import (
     _GrpcChannel,
 )
 from .identity import resolve_identity
+from .markdown_ingest import MarkdownIngestionHandle
 from .scopes import user_collection, resolve_search_scopes
 from libravdb.ipc.v1 import rpc_pb2 as pb
 
@@ -198,6 +199,96 @@ def _cli_status_deep(rebuild_index: bool = False) -> dict:
         }
 
 
+def _cli_markdown_ingest_status() -> dict:
+    """Show markdown ingestion status (what's configured, snapshot file counts)."""
+    config = _load_cli_config()
+    enabled = config.get("markdownIngestionEnabled") is True
+    generic_roots = config.get("markdownIngestionRoots") or []
+    obsidian_roots = (
+        config.get("markdownIngestionObsidianRoots") or []
+        if config.get("markdownIngestionObsidianEnabled") is True
+        else []
+    )
+
+    if not enabled:
+        return {
+            "enabled": False,
+            "message": "Markdown ingestion is disabled. Set markdownIngestionEnabled=true in libravdb.json.",
+        }
+
+    adapters = []
+    if generic_roots:
+        snapshot_path = MarkdownIngestionHandle._resolve_snapshot_path(
+            "generic", config.get("markdownIngestionSnapshotPath")
+        )
+        adapters.append({
+            "kind": "generic",
+            "roots": generic_roots,
+            "snapshotPath": snapshot_path,
+            "includePatterns": config.get("markdownIngestionInclude") or [],
+            "excludePatterns": config.get("markdownIngestionExclude") or [],
+            "priorityMode": config.get("markdownIngestionPriorityMode", "mtime"),
+            "maxTokensPerFile": config.get("markdownIngestionMaxTokensPerFile", 128000),
+        })
+    if obsidian_roots:
+        snapshot_path = MarkdownIngestionHandle._resolve_snapshot_path(
+            "obsidian", config.get("markdownIngestionObsidianSnapshotPath")
+        )
+        adapters.append({
+            "kind": "obsidian",
+            "roots": obsidian_roots,
+            "snapshotPath": snapshot_path,
+            "includePatterns": config.get("markdownIngestionObsidianInclude") or [],
+            "excludePatterns": config.get("markdownIngestionObsidianExclude") or [],
+            "priorityMode": config.get("markdownIngestionPriorityMode", "mtime"),
+            "maxTokensPerFile": config.get("markdownIngestionMaxTokensPerFile", 128000),
+        })
+
+    return {
+        "enabled": True,
+        "adapters": adapters,
+    }
+
+
+def _cli_markdown_ingest_scan() -> dict:
+    """Run a one-shot markdown ingestion scan and report results."""
+    config = _load_cli_config()
+    enabled = config.get("markdownIngestionEnabled") is True
+    if not enabled:
+        return {"ok": False, "error": "Markdown ingestion is not enabled in libravdb.json"}
+
+    channel = _create_cli_channel()
+    identity = resolve_identity()
+
+    try:
+        handle = MarkdownIngestionHandle(
+            config=config,
+            rpc_caller=channel._call,
+            user_id=identity.user_id,
+        )
+        if not handle.is_active:
+            channel.close()
+            return {"ok": False, "error": "No markdown ingestion roots configured"}
+
+        handle.refresh()
+        channel.close()
+        return {
+            "ok": True,
+            "scanned": True,
+            "adapters": [
+                {
+                    "kind": a.kind,
+                    "roots": a.roots,
+                    "fileCount": len(a._snapshot._files),
+                }
+                for a in handle.adapters
+            ],
+        }
+    except Exception as e:
+        channel.close()
+        return {"ok": False, "error": str(e)}
+
+
 def libravdb_command(args) -> None:
     subcommand = getattr(args, "libravdb_subcommand", None)
 
@@ -370,7 +461,20 @@ def libravdb_command(args) -> None:
             print(json.dumps({"ok": False, "error": str(e)}))
         return
 
-    print("Usage: hermes libravdb <status|health|search|flush|export|journal|dream-promote>")
+    if subcommand == "markdown-ingest":
+        ingest_action = getattr(args, "ingest_action", None)
+        if ingest_action == "status":
+            result = _cli_markdown_ingest_status()
+            print(json.dumps(result, indent=2))
+            return
+        if ingest_action == "scan":
+            result = _cli_markdown_ingest_scan()
+            print(json.dumps(result, indent=2))
+            return
+        print("Usage: hermes libravdb markdown-ingest <status|scan>")
+        return
+
+    print("Usage: hermes libravdb <status|health|search|flush|export|journal|dream-promote|markdown-ingest>")
 
 
 def register_cli(subparser) -> None:
@@ -409,3 +513,10 @@ def register_cli(subparser) -> None:
     dream_promote.add_argument("--user-id", required=True, help="User ID namespace")
     dream_promote.add_argument("--dream-file", required=True, help="Path to dream/diary file")
     dream_promote.set_defaults(func=libravdb_command)
+
+    md_ingest = subs.add_parser("markdown-ingest", help="Manage markdown file ingestion")
+    md_subs = md_ingest.add_subparsers(dest="ingest_action")
+    md_status = md_subs.add_parser("status", help="Show ingestion configuration and snapshot status")
+    md_status.set_defaults(func=libravdb_command)
+    md_scan = md_subs.add_parser("scan", help="Run a one-shot markdown directory scan")
+    md_scan.set_defaults(func=libravdb_command)

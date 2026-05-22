@@ -20,6 +20,7 @@ from .scopes import (
     session_collection,
     validate_collection_name,
 )
+from .markdown_ingest import MarkdownIngestionHandle
 
 logger = logging.getLogger(__name__)
 
@@ -319,6 +320,8 @@ class LibraVDBMemoryProvider:
         # Cached daemon status fields (refreshed via _fetch_daemon_status)
         self._cached_gating_threshold: float | None = None
         self._status_fetched_at: float = 0.0
+        # Markdown ingestion (created in initialize() if enabled in config)
+        self._markdown_ingest: MarkdownIngestionHandle | None = None
 
     def _load_config(self) -> Dict[str, Any]:
         config_path = self._hermes_home / "libravdb.json"
@@ -503,6 +506,26 @@ class LibraVDBMemoryProvider:
         except Exception as exc:
             self._startup_error = str(exc)
             self._channel = None
+
+        # ── Markdown ingestion (config-gated, disabled by default) ──────────
+        if (
+            self._channel
+            and cfg.get("markdownIngestionEnabled") is True
+        ):
+            try:
+                self._markdown_ingest = MarkdownIngestionHandle(
+                    config=cfg,
+                    rpc_caller=self._channel._call,
+                    user_id=self.user_id,
+                )
+                if self._markdown_ingest.is_active:
+                    self._markdown_ingest.start()
+                    logger.info(
+                        "Markdown ingestion started (%d adapters)",
+                        len(self._markdown_ingest.adapters),
+                    )
+            except Exception as exc:
+                logger.warning("Markdown ingestion failed to start: %s", exc)
 
     def system_prompt_block(self) -> str:
         if self._startup_error:
@@ -708,6 +731,9 @@ class LibraVDBMemoryProvider:
             logger.debug("LibraVDB session_end failed: %s", exc)
 
     def shutdown(self) -> None:
+        if self._markdown_ingest:
+            self._markdown_ingest.stop()
+            self._markdown_ingest = None
         if self._channel:
             self._channel.close()
             self._channel = None
