@@ -1,3 +1,7 @@
+# Agent context — private, not pushed
+CLAUDE.md
+phase_parity_openclaw.md
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
