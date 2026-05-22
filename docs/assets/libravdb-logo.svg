@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="170" viewBox="0 0 1280 170" role="img" aria-labelledby="title desc">
+  <title id="title">LibraVDB</title>
+  <desc id="desc">Dark purple LibraVDB wordmark.</desc>
+  <rect width="1280" height="170" fill="none"/>
+  <text
+    x="640"
+    y="128"
+    text-anchor="middle"
+    fill="#5B21B6"
+    font-family="Inter, Avenir Next, Helvetica Neue, Arial, sans-serif"
+    font-size="150"
+    font-weight="800"
+    letter-spacing="0">LibraVDB</text>
+</svg>
