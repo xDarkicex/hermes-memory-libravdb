@@ -3,6 +3,7 @@ from .provider import (
     _get_hermes_home,
     _resolve_endpoint,
     _load_secret,
+    register,
 )
 
 __all__ = [
@@ -10,4 +11,5 @@ __all__ = [
     "_get_hermes_home",
     "_resolve_endpoint",
     "_load_secret",
+    "register",
 ]

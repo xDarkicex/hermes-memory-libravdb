@@ -12,6 +12,9 @@ dependencies = [
     "libravdb-contracts>=2.0.5",
 ]
 
+[project.entry-points."hermes_agent.plugins"]
+libravdb-memory = "libravdb:register"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
