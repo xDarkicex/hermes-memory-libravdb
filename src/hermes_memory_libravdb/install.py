@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from importlib import resources
 from pathlib import Path
 
 
@@ -39,6 +40,10 @@ from hermes_memory_libravdb.cli import register_cli, libravdb_command  # noqa: F
 """
 
 
+def _plugin_yaml() -> str:
+    return resources.files("hermes_memory_libravdb").joinpath("plugin.yaml").read_text()
+
+
 def is_installed() -> bool:
     """Return True if the plugin directory already exists."""
     d = _plugin_dir()
@@ -61,12 +66,8 @@ def install(force: bool = False) -> bool:
     (target / "__init__.py").write_text(_init_py())
     (target / "cli.py").write_text(_cli_py())
 
-    # Copy plugin.yaml for metadata discovery
-    import hermes_memory_libravdb
-    pkg_dir = Path(hermes_memory_libravdb.__path__[0])
-    yaml_src = pkg_dir.parent.parent / "plugin.yaml"
-    if yaml_src.exists():
-        (target / "plugin.yaml").write_text(yaml_src.read_text())
+    # Copy plugin.yaml for metadata discovery.
+    (target / "plugin.yaml").write_text(_plugin_yaml())
 
     return True
 

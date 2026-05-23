@@ -28,4 +28,4 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-hermes_memory_libravdb = ["py.typed"]
+hermes_memory_libravdb = ["plugin.yaml", "py.typed"]
