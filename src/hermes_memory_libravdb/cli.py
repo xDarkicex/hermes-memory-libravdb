@@ -146,6 +146,21 @@ def _cli_index(user_id: str | None, session_key: str | None, collections: str | 
         return {"ok": False, "error": str(e)}
 
 
+def _confirm_flush(namespace: str, *, force: bool = False) -> bool:
+    if force:
+        return True
+    print(f"Flushing namespace {namespace} ...")
+    try:
+        confirmation = input(f"Type {namespace} to confirm: ")
+    except EOFError:
+        print(json.dumps({"ok": False, "error": "Flush aborted: confirmation required"}))
+        return False
+    if confirmation != namespace:
+        print(json.dumps({"ok": False, "error": "Flush aborted: namespace confirmation did not match"}))
+        return False
+    return True
+
+
 def _cli_status_deep(rebuild_index: bool = False, force: bool = False) -> dict:
     channel = _create_cli_channel()
     identity = resolve_identity()
@@ -409,15 +424,13 @@ def libravdb_command(args) -> None:
     if subcommand == "flush":
         user_id = getattr(args, "user_id", None)
         session_key = getattr(args, "session_key", None)
+        force = getattr(args, "force", False)
         if not user_id and not session_key:
             print(json.dumps({"error": "--user-id or --session-key is required"}))
             return
         namespace = user_id if user_id else resolve_durable_namespace(session_key=session_key)
-        print(f"Flushing namespace {namespace} ... (ctrl-c to abort)")
-        try:
-            input("Press Enter to confirm: ")
-        except EOFError:
-            pass
+        if not _confirm_flush(namespace, force=force):
+            return
         channel = _create_cli_channel()
         try:
             resp = channel._call("FlushNamespace", pb.FlushNamespaceRequest(user_id=namespace, namespace=""))
@@ -564,6 +577,7 @@ def register_cli(subparser) -> None:
     flush = subs.add_parser("flush", help="Wipe all data for a given namespace")
     flush.add_argument("--user-id", help="User ID namespace to wipe")
     flush.add_argument("--session-key", help="Session key whose derived namespace should be wiped")
+    flush.add_argument("--force", action="store_true", help="Skip interactive namespace confirmation")
     flush.set_defaults(func=libravdb_command)
 
     export = subs.add_parser("export", help="Export all memories for a namespace as NDJSON to stdout")
