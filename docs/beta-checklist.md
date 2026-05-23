@@ -5,8 +5,21 @@ A 5-minute verification path for LibraVDB memory provider testers.
 ## 1. Install
 
 ```bash
+# Install the pip package (use Hermes venv — check with: head -1 $(which hermes))
 pip install hermes-memory-libravdb
-```
+
+# Copy to the memory provider directory
+PROVIDER_DIR="$HOME/.hermes/plugins/libravdb"
+mkdir -p "$PROVIDER_DIR"
+HERMES_PYTHON=$(head -1 $(which hermes) | cut -d' ' -f2)
+"$HERMES_PYTHON" -c "
+import site, shutil, pathlib
+pkg_path = pathlib.Path(site.getsitepackages()[0]) / 'hermes_memory_libravdb'
+shutil.copytree(pkg_path, '$PROVIDER_DIR', dirs_exist_ok=True)
+"
+
+# Enable the plugin
+hermes plugins enable libravdb
 
 The daemon must be running before the plugin connects:
 

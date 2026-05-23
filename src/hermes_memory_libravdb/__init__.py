@@ -18,6 +18,7 @@ from .scopes import (
     resolve_durable_namespace,
     validate_collection_name,
 )
+from agent.context_engine import ContextEngine
 
 __all__ = [
     "LibraVDBMemoryProvider",
@@ -219,7 +220,7 @@ def _on_session_reset(session_id: str = "", **kwargs) -> None:
 
 # ── Context Engine ────────────────────────────────────────────────────────────
 
-class _LibraVDBContextEngine:
+class _LibraVDBContextEngine(ContextEngine):
     """
     Full context engine wired to libravdbd gRPC.
 
@@ -242,6 +243,8 @@ class _LibraVDBContextEngine:
         self.context_length: int = 0
         self.compression_count: int = 0
         self.threshold_percent: float = 0.75
+        self.protect_first_n: int = 3
+        self.protect_last_n: int = 6
 
         self._configure_threshold()
 
@@ -772,11 +775,52 @@ def _build_context_engine(runtime=None, cfg=None, logger=None) -> _LibraVDBConte
 
 
 def register(ctx) -> None:
-    global _provider_instance
+    global _provider_instance, _active_engine
     _provider_instance = LibraVDBMemoryProvider()
-    ctx.register_memory_provider(_provider_instance)
-    ctx.register_hook("on_session_start", _on_session_start)
-    ctx.register_hook("on_session_end", _on_session_end)
-    ctx.register_hook("on_session_finalize", _on_session_finalize)
-    ctx.register_hook("on_session_reset", _on_session_reset)
-    ctx.register_context_engine("libravdb", _build_context_engine)
+
+    # ── _ProviderCollector path (directory-based memory plugin) ──────
+    # Hermes 0.14's plugins/memory/__init__.py uses _ProviderCollector
+    # which has register_memory_provider(), register_hook(), and
+    # register_cli_command() — register_hook/cli_command are no-ops
+    # since CLI is handled separately by discover_plugin_cli_commands().
+    if hasattr(ctx, "register_memory_provider"):
+        ctx.register_memory_provider(_provider_instance)
+        # Register hooks for non-dir-based daemon lifecycle hints
+        if hasattr(ctx, "register_hook"):
+            ctx.register_hook("on_session_start", _on_session_start)
+            ctx.register_hook("on_session_end", _on_session_end)
+            ctx.register_hook("on_session_finalize", _on_session_finalize)
+            ctx.register_hook("on_session_reset", _on_session_reset)
+        return
+
+    # ── PluginContext path (entry-point / pip install) ──────────────
+    # Hermes 0.14's PluginManager uses PluginContext which has
+    # register_tool(), register_cli_command(), register_command(),
+    # and register_context_engine() — but NOT register_memory_provider.
+    
+    # Register tools exposed by the provider
+    for schema in _provider_instance.get_tool_schemas():
+        ctx.register_tool(
+            name=schema["name"],
+            toolset="memory",
+            schema=schema,
+            handler=lambda args, tool_name=schema["name"], **kw: 
+                _provider_instance.handle_tool_call(tool_name, args, **kw),
+        )
+    
+    # Register CLI subcommand (hermes libravdb ...)
+    from . import cli as _cli_module
+    ctx.register_cli_command(
+        name="libravdb",
+        help="Manage the LibraVDB Hermes memory provider",
+        setup_fn=_cli_module.register_cli,
+        handler_fn=_cli_module.libravdb_command,
+    )
+    
+    # Register context engine if available
+    if hasattr(ctx, "register_context_engine"):
+        try:
+            engine = _build_context_engine()
+            ctx.register_context_engine(engine)
+        except Exception:
+            pass

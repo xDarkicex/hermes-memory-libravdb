@@ -21,6 +21,7 @@ from .scopes import (
     validate_collection_name,
 )
 from .markdown_ingest import MarkdownIngestionHandle
+from agent.memory_provider import MemoryProvider
 
 logger = logging.getLogger(__name__)
 
@@ -317,7 +318,7 @@ class _GrpcChannel:
             self._stub = None
 
 
-class LibraVDBMemoryProvider:
+class LibraVDBMemoryProvider(MemoryProvider):
     def __init__(self) -> None:
         self._hermes_home = _get_hermes_home()
         self._endpoint = _resolve_endpoint()
@@ -954,6 +955,48 @@ class LibraVDBMemoryProvider:
             )
         except Exception as exc:
             logger.debug("LibraVDB session_end failed: %s", exc)
+
+    def on_session_switch(
+        self,
+        new_session_id: str,
+        *,
+        parent_session_id: str = "",
+        reset: bool = False,
+        **kwargs,
+    ) -> None:
+        """Handle session rotation — update internal IDs and emit lifecycle hints."""
+        old_id = self._session_id
+        self._session_id = new_session_id
+        self._session_key = new_session_id
+
+        if not self._channel:
+            return
+
+        hook = "before_reset" if reset else "session_finalize"
+        try:
+            self._channel._call(
+                "SessionLifecycleHint",
+                pb.SessionLifecycleHintRequest(
+                    hook=hook,
+                    session_id=old_id,
+                    session_key=old_id,
+                    reason=f"switch_to:{new_session_id}" if not reset else "/reset",
+                ),
+            )
+        except Exception as exc:
+            logger.debug("LibraVDB on_session_switch hint failed: %s", exc)
+
+        try:
+            self._channel._call(
+                "SessionLifecycleHint",
+                pb.SessionLifecycleHintRequest(
+                    hook="session_start",
+                    session_id=new_session_id,
+                    session_key=new_session_id,
+                ),
+            )
+        except Exception as exc:
+            logger.debug("LibraVDB on_session_switch start hint failed: %s", exc)
 
     def shutdown(self) -> None:
         if self._markdown_ingest:

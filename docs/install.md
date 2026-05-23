@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- **Hermes Agent** — version 0.9 or later. See [Hermes Agent installation guide](https://hermes-agent.nousresearch.com/docs/getting-started) if you don't have it installed.
+- **Hermes Agent** — version 0.14.0 or later. See [Hermes Agent installation guide](https://hermes-agent.nousresearch.com/docs/getting-started) if you don't have it installed.
 - **Python** — version 3.10 or later.
 - **libravdbd** — the LibraVDB daemon must be installed and running separately. See the [libravdbd installation guide](https://github.com/xDarkicex/libravdbd) for your platform.
 
@@ -26,12 +26,34 @@
 The fastest way to get started.
 
 ```bash
-pip install hermes-memory-libravdb
+# Find your Hermes Python environment (path may vary)
+export HERMES_PYTHON=$(head -1 $(which hermes) | cut -d' ' -f2)
+HERMES_BIN=$(dirname "$HERMES_PYTHON")
+
+# Install the pip package
+"$HERMES_BIN/pip" install hermes-memory-libravdb
 ```
 
-Then run the interactive setup to select libravdb as your memory provider:
+### Register as a memory provider
+
+Create the memory provider directory and copy the plugin files:
 
 ```bash
+PROVIDER_DIR="$HOME/.hermes/plugins/libravdb"
+mkdir -p "$PROVIDER_DIR"
+
+# Copy plugin package into the Hermes plugin directory
+"$HERMES_BIN/python" -c "
+import site, shutil, pathlib
+pkg_path = pathlib.Path(site.getsitepackages()[0]) / 'hermes_memory_libravdb'
+shutil.copytree(pkg_path, '$PROVIDER_DIR', dirs_exist_ok=True)
+"
+```
+
+Then enable the plugin and configure it:
+
+```bash
+hermes plugins enable libravdb
 hermes memory setup
 ```
 
@@ -52,14 +74,15 @@ hermes libravdb status
    pip show hermes-memory-libravdb
    ```
 
-3. **Manual registration fallback** — create the plugin directory if automatic discovery doesn't work:
-   ```bash
-   mkdir -p ~/.hermes/plugins/memory/libravdb
-   cp -r $(pip show -f hermes-memory-libravdb | grep Location | cut -d' ' -f2)/hermes_memory_libravdb/* ~/.hermes/plugins/memory/libravdb/
-   ```
-   Then restart Hermes.
+3. **Check Hermes version** — this plugin requires Hermes Agent 0.14.0 or later. Run `hermes --version`.
 
-4. **Check Hermes version** — this plugin requires Hermes Agent 0.9 or later. Run `hermes --version`.
+4. **Plugin not found in `hermes memory setup`** — ensure the plugin directory exists:
+
+   ```bash
+   ls ~/.hermes/plugins/libravdb/__init__.py
+   ```
+
+   If missing, re-run the install copy step above.
 
 You should see output with `ok: true` and memory counts. If you see an error instead, check that `libravdbd` is running and that `LIBRAVDB_GRPC_ENDPOINT` is set correctly (see [Configuration](./configuration.md)).
 
@@ -77,21 +100,28 @@ cd hermes-memory-libravdb
 pip install -e .
 ```
 
-Hermes will auto-discover the plugin via the `hermes_agent.plugins` entry point on next restart.
+Hermes discovers directory-based memory plugins from `~/.hermes/plugins/`. After the editable install, copy the plugin directory:
+
+```bash
+PROVIDER_DIR="$HOME/.hermes/plugins/libravdb"
+mkdir -p "$PROVIDER_DIR"
+cp -r src/hermes_memory_libravdb/* "$PROVIDER_DIR/"
+```
 
 ### Option B — Manual plugin directory
 
 Copy the plugin to Hermes's plugin directory:
 
 ```bash
-cp -r /path/to/hermes-memory-libravdb ~/.hermes/plugins/memory/libravdb
+cp -r /path/to/hermes-memory-libravdb/src/hermes_memory_libravdb ~/.hermes/plugins/libravdb
+cp /path/to/hermes-memory-libravdb/plugin.yaml ~/.hermes/plugins/libravdb/
 ```
 
-Then enable it by adding to your `~/.hermes/config.yaml`:
+Then enable it and configure:
 
-```yaml
-memory:
-  provider: "libravdb"
+```bash
+hermes plugins enable libravdb
+hermes memory setup  # Select 'libravdb' when prompted
 ```
 
 Restart Hermes to load the plugin.

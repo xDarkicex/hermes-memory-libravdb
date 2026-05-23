@@ -5,7 +5,7 @@
 </div>
 
 <div align="center">
-  <a href="./pyproject.toml"><img src="https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white" alt="Python 3.9+"></a>
+|  <a href="./pyproject.toml"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+"></a>
   <a href="./plugin.yaml"><img src="https://img.shields.io/badge/Hermes-memory%20provider-00D8FF?logo=hermes&logoColor=white" alt="Hermes memory provider"></a>
   <a href="https://pypi.org/project/hermes-memory-libravdb/"><img src="https://img.shields.io/pypi/v/hermes-memory-libravdb?label=release&color=5B21B6&cacheSeconds=0" alt="Release"></a>
 </div>
@@ -41,12 +41,36 @@ systemctl --user enable --now libravdbd
 
 **Plugin (all platforms)**
 
+First, find your Hermes Python environment:
+
 ```bash
-pip install hermes-memory-libravdb
+# Activate Hermes venv (path may vary)
+export HERMES_PYTHON=$(head -1 $(which hermes) | cut -d' ' -f2)
+HERMES_BIN=$(dirname "$HERMES_PYTHON")
+"$HERMES_BIN/pip" install hermes-memory-libravdb
 ```
 
-Then configure the plugin in `~/.hermes/plugins/memory/libravdb/` or via
-`hermes memory setup` and select `libravdb` as the memory provider.
+Then register the plugin as a memory provider:
+
+```bash
+# Copy plugin files to Hermes' plugin directory
+PROVIDER_DIR="$HOME/.hermes/plugins/libravdb"
+mkdir -p "$PROVIDER_DIR"
+"$HERMES_BIN/python" -c "
+import site, shutil, pathlib
+pkg_path = pathlib.Path(site.getsitepackages()[0]) / 'hermes_memory_libravdb'
+shutil.copytree(pkg_path, '$PROVIDER_DIR', dirs_exist_ok=True)
+"
+
+# Enable the plugin
+hermes plugins enable libravdb
+```
+
+Configure Hermes to use it:
+
+```bash
+hermes memory setup  # Select 'libravdb' when prompted
+```
 
 Verify the service:
 
@@ -61,13 +85,13 @@ gate threshold.
 
 Runtime requirements:
 
-- Hermes Agent `>= 0.9`
-- Python `>= 3.9`
+- Hermes Agent `>= 0.14.0`
+- Python `>= 3.10`
 - a separately installed `libravdbd` service
 
 Compatibility note:
 
-- this plugin is currently verified against Hermes Agent `0.9.x`
+- this plugin is currently verified against Hermes Agent `0.14.x`
 
 Default endpoint:
 
