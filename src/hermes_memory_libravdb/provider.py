@@ -21,7 +21,10 @@ from .scopes import (
     validate_collection_name,
 )
 from .markdown_ingest import MarkdownIngestionHandle
-from agent.memory_provider import MemoryProvider
+try:
+    from agent.memory_provider import MemoryProvider
+except ImportError:
+    MemoryProvider = object  # fallback when hermes-agent not installed (CI, linting)
 
 logger = logging.getLogger(__name__)
 

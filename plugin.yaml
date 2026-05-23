@@ -5,4 +5,7 @@ pip_dependencies:
   - "grpcio>=1.60"
   - "libravdb-contracts>=2.0.5"
 hooks:
+  - on_session_start
   - on_session_end
+  - on_session_finalize
+  - on_session_reset
