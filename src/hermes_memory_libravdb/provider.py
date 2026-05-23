@@ -297,7 +297,7 @@ class _GrpcChannel:
         except grpc.RpcError:
             raise
 
-    def _update_nonce_from_response(self, resp):
+    def _update_nonce_from_response(self, resp, method_name: str = ""):
         try:
             metadata = resp.initial_metadata()
             nonce = metadata.get("x-libravdb-nonce") if metadata else None
