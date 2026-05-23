@@ -4,6 +4,8 @@ import logging
 import re
 from typing import Any
 
+from agent.context_engine import ContextEngine
+
 from .provider import (
     LibraVDBMemoryProvider,
     _get_hermes_home,
@@ -219,7 +221,7 @@ def _on_session_reset(session_id: str = "", **kwargs) -> None:
 
 # ── Context Engine ────────────────────────────────────────────────────────────
 
-class _LibraVDBContextEngine:
+class _LibraVDBContextEngine(ContextEngine):
     """
     Full context engine wired to libravdbd gRPC.
 
@@ -228,7 +230,9 @@ class _LibraVDBContextEngine:
     by the daemon — this class translates Hermes calls into proper RPC requests.
     """
 
-    name: str = "libravdb"
+    @property
+    def name(self) -> str:
+        return "libravdb"
 
     def __init__(self, provider: LibraVDBMemoryProvider):
         self._provider = provider
@@ -772,11 +776,22 @@ def _build_context_engine(runtime=None, cfg=None, logger=None) -> _LibraVDBConte
 
 
 def register(ctx) -> None:
-    global _provider_instance
+    global _provider_instance, _active_engine
     _provider_instance = LibraVDBMemoryProvider()
-    ctx.register_memory_provider(_provider_instance)
+
+    # Memory provider — _ProviderCollector (directory load path) has this;
+    # the real PluginContext (entry-point path) does not.
+    if hasattr(ctx, "register_memory_provider"):
+        ctx.register_memory_provider(_provider_instance)
+
+    # Context engine — only the real PluginContext (entry-point path) has
+    # register_context_engine.  _ProviderCollector does not, so we guard.
+    if hasattr(ctx, "register_context_engine"):
+        _active_engine = _LibraVDBContextEngine(_provider_instance)
+        ctx.register_context_engine(_active_engine)
+
+    # Hooks — both context types accept these.
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("on_session_end", _on_session_end)
     ctx.register_hook("on_session_finalize", _on_session_finalize)
     ctx.register_hook("on_session_reset", _on_session_reset)
-    ctx.register_context_engine("libravdb", _build_context_engine)

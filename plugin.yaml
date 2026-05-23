@@ -1,5 +1,5 @@
 name: libravdb
-version: 0.5.2
+version: 0.6.0
 description: "Native LibraVDB memory provider for Hermes Agent using real gRPC"
 hooks:
   - on_session_start

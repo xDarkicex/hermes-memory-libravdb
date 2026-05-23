@@ -14,6 +14,8 @@ import grpc
 from libravdb.ipc.v1 import rpc_pb2 as pb
 from libravdb.ipc.v1 import rpc_pb2_grpc as services
 
+from agent.memory_provider import MemoryProvider
+
 from .identity import resolve_identity, ResolvedIdentity
 from .scopes import (
     resolve_search_scopes,
@@ -317,7 +319,7 @@ class _GrpcChannel:
             self._stub = None
 
 
-class LibraVDBMemoryProvider:
+class LibraVDBMemoryProvider(MemoryProvider):
     def __init__(self) -> None:
         self._hermes_home = _get_hermes_home()
         self._endpoint = _resolve_endpoint()
