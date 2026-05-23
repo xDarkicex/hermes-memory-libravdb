@@ -63,8 +63,10 @@ ACP sessions behave like CLI sessions from LibraVDB's perspective — the lifecy
 | Session ID | Generated per delegation |
 | Writes enabled | Only if `agent_context == "primary"` |
 | Delegation hook | `on_delegation` fires with task + result after child completes |
+| Memory tool | Blocked for all subagents — `on_memory_write` never fires from children |
+| Context isolation | Subagents start with zero knowledge of parent conversation; only `goal` and `context` fields carry information |
 
-LibraVDB skips writes in non-primary agent contexts to avoid duplicating memory. Delegation results are persisted via `on_delegation` so the parent session can recall subagent findings.
+LibraVDB skips writes in non-primary agent contexts to avoid duplicating memory. Delegation results are persisted via `on_delegation` so the parent session can recall subagent findings. The `memory` tool is one of five tools always blocked for subagents (alongside `clarify`, `code_execution`, `delegate_task` for leaf agents, and `send_message`), so curated memory mirroring only ever originates from the parent agent.
 
 ---
 

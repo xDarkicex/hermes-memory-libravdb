@@ -710,9 +710,20 @@ class LibraVDBMemoryProvider:
                 pass
         return result
 
-    # TODO: implement
     def on_turn_start(self, turn: Any, message: Any, **kwargs) -> None:
-        logger.debug("LibraVDB on_turn_start: turn=%s", turn)
+        """Intentionally unimplemented.
+
+        Hermes fires this at the start of each conversation turn.  We evaluated
+        whether it adds unique signal beyond the existing extension points:
+
+        - ``prefetch`` already provides pre-turn context injection.
+        - ``queue_prefetch`` already warms daemon-side caches for the next turn.
+        - ``sync_turn`` already persists turn content after the response.
+
+        Adding behavior here would duplicate one of the above without a
+        distinct lifecycle benefit.  Leaving it as a no-op is cleaner than
+        speculative behavior.
+        """
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
         """Persist key conversation context before Hermes compresses or resets.
@@ -778,7 +789,10 @@ class LibraVDBMemoryProvider:
             return
 
         # Only mirror durable memory targets
-        durable_targets = ("MEMORY.md", "USER.md", "memory")
+        # Hermes memory tool targets: "memory" (MEMORY.md) and "user" (USER.md).
+        # The tool passes the target verbatim; we also catch the file names
+        # in case Hermes normalizes to the path form.
+        durable_targets = ("MEMORY.md", "USER.md", "memory", "user")
         target_lower = target.lower() if target else ""
         if not any(t in target_lower for t in durable_targets):
             return
@@ -955,6 +969,12 @@ class LibraVDBMemoryProvider:
                 "key": "endpoint",
                 "description": "LibraVDB gRPC endpoint (`auto`, `unix:/path`, or `tcp:host:port`)",
                 "default": "auto",
+            },
+            {
+                "key": "LIBRAVDB_AUTH_SECRET",
+                "description": "Shared HMAC-SHA256 secret for challenge-response nonce auth with the daemon",
+                "secret": True,
+                "env_var": "LIBRAVDB_AUTH_SECRET",
             },
         ]
 
