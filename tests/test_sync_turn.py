@@ -87,3 +87,16 @@ class TestSyncTurnReturnsImmediately:
         provider.sync_turn("hello", "hi")
 
         provider._channel._call.assert_not_called()
+
+    def test_sync_turn_degrades_on_invalid_ingest_queue_config(self):
+        """Invalid ingest queue config must not raise into the turn lifecycle."""
+        provider = LibraVDBMemoryProvider()
+        provider._channel = MagicMock()
+        provider._writes_enabled = True
+        provider._session_id = "test-session"
+        provider._config = {"ingestChunkTokens": "not-an-int"}
+
+        provider.sync_turn("hello", "hi")
+
+        provider._channel._call.assert_not_called()
+        assert "Invalid LibraVDB ingest queue config" in provider.system_prompt_block()

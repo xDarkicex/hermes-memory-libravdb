@@ -613,14 +613,19 @@ class LibraVDBMemoryProvider(MemoryProvider):
         if not self._channel or not self._writes_enabled:
             return
         session = session_id or self._session_id
-        queue = IngestQueue(
-            channel=self._channel,
-            user_id=self.user_id,
-            session_id=session,
-            chunk_tokens=int(self._config.get("ingestChunkTokens", _INGEST_CHUNK_TOKENS)),
-            retry_base_delay_ms=int(self._config.get("ingestRetryBaseDelayMs", _INGEST_RETRY_BASE_DELAY_MS)),
-            max_retries=int(self._config.get("ingestMaxRetries", _INGEST_MAX_RETRIES)),
-        )
+        try:
+            queue = IngestQueue(
+                channel=self._channel,
+                user_id=self.user_id,
+                session_id=session,
+                chunk_tokens=int(self._config.get("ingestChunkTokens", _INGEST_CHUNK_TOKENS)),
+                retry_base_delay_ms=int(self._config.get("ingestRetryBaseDelayMs", _INGEST_RETRY_BASE_DELAY_MS)),
+                max_retries=int(self._config.get("ingestMaxRetries", _INGEST_MAX_RETRIES)),
+            )
+        except Exception as exc:
+            self._startup_error = f"Invalid LibraVDB ingest queue config: {exc}"
+            logger.debug("LibraVDB sync_turn skipped: %s", exc)
+            return
         threading.Thread(target=self._ingest_with_queue, args=(queue, user_content, assistant_content), daemon=True).start()
 
     def _ingest_with_queue(self, queue: "IngestQueue", user_content: str, assistant_content: str) -> None:
