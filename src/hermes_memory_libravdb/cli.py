@@ -400,6 +400,9 @@ def libravdb_command(args) -> None:
                 for r in results:
                     print(f"[{r['score']:.2f}] {r['text'][:200]}")
             return
+        except Exception as e:
+            print(json.dumps({"ok": False, "error": str(e)}))
+            return
         finally:
             channel.close()
 

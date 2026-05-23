@@ -35,9 +35,32 @@ brew services start libravdbd
 **Linux (APT)**
 
 ```bash
+curl -fsSL https://xDarkicex.github.io/apt-libravdbd/gpg.key | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/libravdbd.gpg
+echo "deb https://xDarkicex.github.io/apt-libravdbd stable main" | sudo tee /etc/apt/sources.list.d/libravdbd.list
+sudo apt update
 sudo apt install libravdbd
 systemctl --user enable --now libravdbd
 ```
+
+**Linux (AUR)**
+
+```bash
+yay -S libravdbd-bin
+systemctl --user enable --now libravdbd
+```
+
+> **After upgrades:** Always restart the daemon so the newly installed binary takes effect:
+> ```bash
+> # macOS (Homebrew)
+> brew services restart libravdbd
+>
+> # Linux (systemd)
+> systemctl --user restart libravdbd
+>
+> # Linux (no systemd — kill and restart manually)
+> killall libravdbd && libravdbd &
+> ```
+> Failing to restart leaves the old process running — it will not auto-replace a live background service. If you see "Protocol error" or connection failures after an upgrade, this is almost always the cause.
 
 **Plugin (all platforms)**
 
@@ -71,6 +94,22 @@ Configure Hermes to use it:
 ```bash
 hermes memory setup  # Select 'libravdb' when prompted
 ```
+# Install the pip package
+pip install hermes-memory-libravdb
+
+# Install into Hermes plugin directory (required for Hermes 0.14 discovery)
+hermes-memory-libravdb-setup install
+```
+
+On Debian/Ubuntu, use pipx or the Hermes venv to avoid PEP 668 errors:
+
+```bash
+pipx install hermes-memory-libravdb
+hermes-memory-libravdb-setup install
+```
+
+Then set `memory.provider: "libravdb"` in `~/.hermes/config.yaml` or run
+`hermes memory setup` and select `libravdb`.
 
 Verify the service:
 
@@ -85,18 +124,19 @@ gate threshold.
 
 Runtime requirements:
 
-- Hermes Agent `>= 0.14.0`
-- Python `>= 3.10`
+- Hermes Agent `>= 0.14`
+- Python `>= 3.9`
 - a separately installed `libravdbd` service
 
 Compatibility note:
 
 - this plugin is currently verified against Hermes Agent `0.14.x`
 
-Default endpoint:
+Default endpoints:
 
 - macOS/Linux user-local service: `unix:$HOME/.libravdbd/run/libravdb.sock`
 - Homebrew service on Apple Silicon: `unix:/opt/homebrew/var/libravdbd/run/libravdb.sock`
+- Windows service: `tcp:127.0.0.1:37421`
 
 If your service runs elsewhere, set the `LIBRAVDB_GRPC_ENDPOINT` environment variable:
 

@@ -4,6 +4,8 @@ description: "Native LibraVDB memory provider for Hermes Agent — gRPC-backed s
 pip_dependencies:
   - "grpcio>=1.60"
   - "libravdb-contracts>=2.0.5"
+version: 0.6.1
+description: "Native LibraVDB memory provider for Hermes Agent using real gRPC"
 hooks:
   - on_session_start
   - on_session_end

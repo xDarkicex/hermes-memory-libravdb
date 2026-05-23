@@ -20,6 +20,7 @@ shutil.copytree(pkg_path, '$PROVIDER_DIR', dirs_exist_ok=True)
 
 # Enable the plugin
 hermes plugins enable libravdb
+## 1. Install Daemon
 
 The daemon must be running before the plugin connects:
 
@@ -34,15 +35,29 @@ sudo apt install libravdbd
 systemctl --user enable --now libravdbd
 ```
 
-## 2. Configure
+## 2. Install Plugin
 
-Run the guided setup:
+```bash
+pip install hermes-memory-libravdb
+hermes-memory-libravdb-setup install
+```
+
+On Debian/Ubuntu, use pipx to avoid PEP 668 errors:
+
+```bash
+pipx install hermes-memory-libravdb
+hermes-memory-libravdb-setup install
+```
+
+## 3. Configure
+
+Set `memory.provider: "libravdb"` in `~/.hermes/config.yaml`, or run:
 
 ```bash
 hermes memory setup
 ```
 
-Select **libravdb** when prompted. This writes `~/.hermes/libravdb.json` and sets `memory.provider: "libravdb"` in `~/.hermes/config.yaml`.
+Select **libravdb** when prompted.
 
 If your daemon listens on a non-default endpoint, set it before running setup:
 
@@ -56,7 +71,7 @@ For authenticated daemons (HMAC-SHA256), set the shared secret:
 export LIBRAVDB_AUTH_SECRET="your-secret-here"
 ```
 
-## 3. Verify
+## 4. Verify
 
 Restart Hermes or start a new session, then run:
 
@@ -72,7 +87,7 @@ hermes libravdb health
 
 Expected: healthy response from the daemon.
 
-## 4. Search Test
+## 5. Search Test
 
 Start a Hermes conversation, exchange a few messages so the daemon has content to index, then test search:
 
@@ -82,7 +97,7 @@ hermes libravdb search "test query" --limit 5
 
 Expected: JSON results with `id`, `score`, and `text` fields.
 
-## 5. Tools Test
+## 6. Tools Test
 
 Inside a Hermes conversation, ask the agent to use the tools:
 
@@ -94,7 +109,7 @@ The agent should call `libravdb_search` and return results.
 
 The agent should call `libravdb_status` and report the daemon state.
 
-## 6. Context Engine (Optional)
+## 7. Context Engine (Optional)
 
 If you want to test the context engine, add to `~/.hermes/config.yaml`:
 

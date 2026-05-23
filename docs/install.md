@@ -2,9 +2,9 @@
 
 ## Prerequisites
 
-- **Hermes Agent** — version 0.14.0 or later. See [Hermes Agent installation guide](https://hermes-agent.nousresearch.com/docs/getting-started) if you don't have it installed.
+- **Hermes Agent** — version 0.14 or later. See [Hermes Agent installation guide](https://hermes-agent.nousresearch.com/docs/getting-started) if you don't have it installed.
 - **Python** — version 3.10 or later.
-- **libravdbd** — the LibraVDB daemon must be installed and running separately. See the [libravdbd installation guide](https://github.com/xDarkicex/libravdbd) for your platform.
+- **libravdbd** — the LibraVDB vector service must be installed and running. Install via one of the package manager methods below.
 
   ```bash
   # macOS (Homebrew)
@@ -13,9 +13,29 @@
   brew services start libravdbd
 
   # Linux (APT)
+  curl -fsSL https://xDarkicex.github.io/apt-libravdbd/gpg.key | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/libravdbd.gpg
+  echo "deb https://xDarkicex.github.io/apt-libravdbd stable main" | sudo tee /etc/apt/sources.list.d/libravdbd.list
+  sudo apt update
   sudo apt install libravdbd
   systemctl --user enable --now libravdbd
+
+  # Linux (AUR)
+  yay -S libravdbd-bin
+  systemctl --user enable --now libravdbd
   ```
+
+  > **After upgrades:** Always restart the daemon so the newly installed binary takes effect:
+  > ```bash
+  > # macOS (Homebrew)
+  > brew services restart libravdbd
+  >
+  > # Linux (systemd)
+  > systemctl --user restart libravdbd
+  >
+  > # Linux (no systemd — kill and restart manually)
+  > killall libravdbd && libravdbd &
+  > ```
+  > Failing to restart leaves the old process running — it will not auto-replace a live background service. If you see "Protocol error" or connection failures after an upgrade, this is almost always the cause.
 
 - **Environment variable** `LIBRAVDB_GRPC_ENDPOINT` — set this if your daemon runs somewhere other than the default Unix socket path (see [Configuration](./configuration.md)).
 
@@ -26,31 +46,21 @@
 The fastest way to get started.
 
 ```bash
-# Find your Hermes Python environment (path may vary)
-export HERMES_PYTHON=$(head -1 $(which hermes) | cut -d' ' -f2)
-HERMES_BIN=$(dirname "$HERMES_PYTHON")
+# 1. Install the pip package
+pip install hermes-memory-libravdb
 
-# Install the pip package
-"$HERMES_BIN/pip" install hermes-memory-libravdb
+# 2. Install into Hermes plugin directory
+hermes-memory-libravdb-setup install
 ```
 
-### Register as a memory provider
-
-Create the memory provider directory and copy the plugin files:
+On Debian/Ubuntu, use pipx or the Hermes venv to avoid PEP 668 errors:
 
 ```bash
-PROVIDER_DIR="$HOME/.hermes/plugins/libravdb"
-mkdir -p "$PROVIDER_DIR"
-
-# Copy plugin package into the Hermes plugin directory
-"$HERMES_BIN/python" -c "
-import site, shutil, pathlib
-pkg_path = pathlib.Path(site.getsitepackages()[0]) / 'hermes_memory_libravdb'
-shutil.copytree(pkg_path, '$PROVIDER_DIR', dirs_exist_ok=True)
-"
+pipx install hermes-memory-libravdb
+hermes-memory-libravdb-setup install
 ```
 
-Then enable the plugin and configure it:
+Then configure Hermes to use libravdb:
 
 ```bash
 hermes plugins enable libravdb
@@ -58,6 +68,7 @@ hermes memory setup
 ```
 
 Follow the prompts and choose **libravdb** when asked which memory provider to use.
+This writes `memory.provider: "libravdb"` to `~/.hermes/config.yaml`.
 
 After setup, verify the plugin is working:
 
@@ -67,7 +78,14 @@ hermes libravdb status
 
 ### Troubleshooting: libravdb doesn't appear in hermes memory setup
 
-1. **Restart Hermes** — Hermes discovers pip-installed plugins at startup. After `pip install`, restart Hermes completely.
+1. **Run the setup command** — this plugin must be installed to `$HERMES_HOME/plugins/libravdb/` for Hermes to discover it:
+   ```bash
+   hermes-memory-libravdb-setup install
+   ```
+   Verify it exists:
+   ```bash
+   ls ~/.hermes/plugins/libravdb/
+   ```
 
 2. **Verify the package installed**:
    ```bash
@@ -110,11 +128,20 @@ cp -r src/hermes_memory_libravdb/* "$PROVIDER_DIR/"
 
 ### Option B — Manual plugin directory
 
-Copy the plugin to Hermes's plugin directory:
+Create the plugin directory structure under Hermes:
 
 ```bash
-cp -r /path/to/hermes-memory-libravdb/src/hermes_memory_libravdb ~/.hermes/plugins/libravdb
-cp /path/to/hermes-memory-libravdb/plugin.yaml ~/.hermes/plugins/libravdb/
+mkdir -p ~/.hermes/plugins/libravdb
+```
+
+Create `~/.hermes/plugins/libravdb/__init__.py`:
+```python
+from hermes_memory_libravdb import register, LibraVDBMemoryProvider
+```
+
+Create `~/.hermes/plugins/libravdb/cli.py`:
+```python
+from hermes_memory_libravdb.cli import register_cli, libravdb_command
 ```
 
 Then enable it and configure:
@@ -166,10 +193,14 @@ To switch away from libravdb as your memory provider:
    pip uninstall hermes-memory-libravdb
    ```
 
-3. If you used the manual plugin directory, remove it:
+3. Remove the plugin directory:
 
    ```bash
-   rm -rf ~/.hermes/plugins/memory/libravdb
+   hermes-memory-libravdb-setup uninstall
+   ```
+   Or manually:
+   ```bash
+   rm -rf ~/.hermes/plugins/libravdb
    ```
 
 To also remove all stored memory data, delete the daemon's data directory. The default location is `$HERMES_HOME/.libravdbd/` where `$HERMES_HOME` is your Hermes configuration directory (typically `~/.hermes`). See [Uninstall](./uninstall.md) for details.
