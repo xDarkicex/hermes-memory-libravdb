@@ -1,7 +1,14 @@
 import time
 from unittest.mock import MagicMock
 
-from hermes_memory_libravdb.provider import _NonceState, _GrpcChannel, LibraVDBMemoryProvider
+import pytest
+
+from hermes_memory_libravdb.provider import (
+    _NonceState,
+    _GrpcChannel,
+    _load_secret,
+    LibraVDBMemoryProvider,
+)
 
 
 class TestHealthNonceExtraction:
@@ -47,6 +54,24 @@ class TestHealthNonceExtraction:
         assert nonce_state.should_sign("SomeMethod") is True
 
         assert nonce_state.should_sign("Health") is False
+
+
+class TestAuthSecretLoading:
+    def test_missing_secret_file_fails_closed(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("LIBRAVDB_AUTH_SECRET", raising=False)
+        monkeypatch.setenv("LIBRAVDB_AUTH_SECRET_FILE", str(tmp_path / "missing"))
+
+        with pytest.raises(RuntimeError, match="Unable to read LIBRAVDB_AUTH_SECRET_FILE"):
+            _load_secret()
+
+    def test_empty_secret_file_fails_closed(self, monkeypatch, tmp_path):
+        secret_file = tmp_path / "secret"
+        secret_file.write_text("")
+        monkeypatch.delenv("LIBRAVDB_AUTH_SECRET", raising=False)
+        monkeypatch.setenv("LIBRAVDB_AUTH_SECRET_FILE", str(secret_file))
+
+        with pytest.raises(RuntimeError, match="is empty"):
+            _load_secret()
 
 
 class TestSyncTurnReturnsImmediately:

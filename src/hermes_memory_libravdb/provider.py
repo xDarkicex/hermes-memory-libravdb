@@ -74,9 +74,16 @@ def _load_secret() -> str | None:
     secret_path = os.environ.get("LIBRAVDB_AUTH_SECRET_FILE")
     if secret_path:
         try:
-            return Path(secret_path).read_text().strip()
-        except Exception:
-            return None
+            loaded = Path(secret_path).read_text().strip()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Unable to read LIBRAVDB_AUTH_SECRET_FILE at {secret_path!r}"
+            ) from exc
+        if not loaded:
+            raise RuntimeError(
+                f"LIBRAVDB_AUTH_SECRET_FILE at {secret_path!r} is empty"
+            )
+        return loaded
     return None
 
 
