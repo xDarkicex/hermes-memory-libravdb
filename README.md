@@ -5,10 +5,9 @@
 </div>
 
 <div align="center">
-  <a href="https://github.com/xDarkicex/libravdbd"><img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25+"></a>
   <a href="./pyproject.toml"><img src="https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white" alt="Python 3.9+"></a>
   <a href="./plugin.yaml"><img src="https://img.shields.io/badge/Hermes-memory%20provider-00D8FF?logo=hermes&logoColor=white" alt="Hermes memory provider"></a>
-  <a href="https://pypi.org/project/hermes-memory-libravdb/"><img src="https://img.shields.io/pypi/v/hermes-memory-libravdb?label=release&color=5B21B6" alt="Release"></a>
+  <a href="https://pypi.org/project/hermes-memory-libravdb/"><img src="https://img.shields.io/pypi/v/hermes-memory-libravdb?label=release&color=5B21B6&cacheSeconds=0" alt="Release"></a>
 </div>
 
 `hermes-memory-libravdb` is a native Python memory provider for Hermes Agent
