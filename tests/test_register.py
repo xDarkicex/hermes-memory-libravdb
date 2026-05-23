@@ -1,4 +1,8 @@
+import json
+
 import hermes_memory_libravdb
+from hermes_memory_libravdb import _LibraVDBContextEngine
+from hermes_memory_libravdb.provider import LibraVDBMemoryProvider
 
 
 class TestRegisterEntrypoint:
@@ -11,3 +15,17 @@ class TestRegisterEntrypoint:
         assert hasattr(hermes_memory_libravdb, "_get_hermes_home")
         assert hasattr(hermes_memory_libravdb, "_resolve_endpoint")
         assert hasattr(hermes_memory_libravdb, "_load_secret")
+
+    def test_invalid_context_threshold_config_degrades(self, tmp_path, monkeypatch):
+        (tmp_path / "libravdb.json").write_text(
+            json.dumps({"compactionThresholdFraction": "not-a-float"})
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        provider = LibraVDBMemoryProvider()
+        provider.initialize("session")
+        engine = _LibraVDBContextEngine(provider)
+
+        assert engine.threshold_tokens == 1600
+        assert engine.threshold_percent == 0.8
+        assert "Invalid LibraVDB context config" in provider.system_prompt_block()

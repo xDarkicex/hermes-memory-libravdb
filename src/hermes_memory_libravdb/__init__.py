@@ -274,15 +274,22 @@ class _LibraVDBContextEngine(ContextEngine):
     def _configure_threshold(self) -> None:
         """Derive threshold_tokens from config or budget fraction."""
         cfg = self._provider._config
-        explicit = cfg.get("compactThreshold")
-        if explicit and explicit > 0:
-            self.threshold_tokens = int(explicit)
-        else:
+        try:
             fraction = float(cfg.get("compactionThresholdFraction", DEFAULT_COMPACTION_THRESHOLD_FRACTION))
             fraction = max(0.05, min(0.99, fraction))
-            budget = int(cfg.get("compactSessionTokenBudget", 2000))
-            self.threshold_tokens = max(1, int(budget * fraction))
-        self.threshold_percent = float(cfg.get("compactionThresholdFraction", DEFAULT_COMPACTION_THRESHOLD_FRACTION))
+            explicit = cfg.get("compactThreshold")
+            if explicit is not None and float(explicit) > 0:
+                self.threshold_tokens = int(float(explicit))
+            else:
+                budget = int(cfg.get("compactSessionTokenBudget", 2000))
+                self.threshold_tokens = max(1, int(budget * fraction))
+            self.threshold_percent = fraction
+        except Exception as exc:
+            fraction = DEFAULT_COMPACTION_THRESHOLD_FRACTION
+            self.threshold_tokens = max(1, int(2000 * fraction))
+            self.threshold_percent = fraction
+            if not getattr(self._provider, "_startup_error", None):
+                self._provider._startup_error = f"Invalid LibraVDB context config: {exc}"
 
     def update_from_response(self, usage: dict[str, Any]) -> None:
         """Update token counters from a model response usage block."""
