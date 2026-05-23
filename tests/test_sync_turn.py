@@ -1,3 +1,4 @@
+import json
 import time
 from unittest.mock import MagicMock
 
@@ -87,3 +88,20 @@ class TestSyncTurnReturnsImmediately:
         provider.sync_turn("hello", "hi")
 
         provider._channel._call.assert_not_called()
+
+
+class TestProfileConfigIsolation:
+    def test_initialize_loads_config_from_profile_hermes_home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "default"))
+        profile_home = tmp_path / "profile"
+        profile_home.mkdir()
+        (profile_home / "libravdb.json").write_text(
+            json.dumps({"userId": "profile-user", "topK": 3})
+        )
+
+        provider = LibraVDBMemoryProvider()
+        provider.initialize("session-1", hermes_home=str(profile_home))
+
+        assert provider._hermes_home == profile_home
+        assert provider.user_id == "profile-user"
+        assert provider._top_k == 3

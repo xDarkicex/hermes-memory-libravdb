@@ -436,6 +436,11 @@ class LibraVDBMemoryProvider(MemoryProvider):
         }
 
     def initialize(self, session_id: str, **kwargs) -> None:
+        hermes_home = kwargs.get("hermes_home")
+        if hermes_home:
+            self._hermes_home = Path(str(hermes_home)).expanduser()
+            self._config = self._load_config()
+
         self._session_id = session_id
         self._session_key = session_id
         # Resolve identity: explicit user_id arg wins, else auto-derive
