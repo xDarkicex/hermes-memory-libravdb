@@ -1,3 +1,4 @@
+import json
 import time
 from unittest.mock import MagicMock
 
@@ -87,3 +88,29 @@ class TestSyncTurnReturnsImmediately:
         provider.sync_turn("hello", "hi")
 
         provider._channel._call.assert_not_called()
+
+
+class TestInvalidRuntimeConfig:
+    def test_invalid_numeric_runtime_config_degrades_startup(self, tmp_path, monkeypatch):
+        """Bad numeric config must not raise out of provider initialization."""
+        (tmp_path / "libravdb.json").write_text(json.dumps({"topK": "not-an-int"}))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        provider = LibraVDBMemoryProvider()
+        provider.initialize("session")
+
+        assert provider._channel is None
+        assert "Invalid LibraVDB runtime config" in provider.system_prompt_block()
+
+    def test_invalid_compaction_budget_degrades_startup(self, tmp_path, monkeypatch):
+        """Compaction budget coercion errors should use the same degraded path."""
+        (tmp_path / "libravdb.json").write_text(
+            json.dumps({"compactSessionTokenBudget": "not-an-int"})
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        provider = LibraVDBMemoryProvider()
+        provider.initialize("session")
+
+        assert provider._channel is None
+        assert "Invalid LibraVDB runtime config" in provider.system_prompt_block()
