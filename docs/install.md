@@ -4,7 +4,7 @@
 
 - **Hermes Agent** — version 0.14 or later. See [Hermes Agent installation guide](https://hermes-agent.nousresearch.com/docs/getting-started) if you don't have it installed.
 - **Python** — version 3.10 or later.
-- **libravdbd** — the LibraVDB daemon must be installed and running separately. See the [libravdbd installation guide](https://github.com/xDarkicex/libravdbd) for your platform.
+- **libravdbd** — the LibraVDB vector service must be installed and running. Install via one of the package manager methods below.
 
   ```bash
   # macOS (Homebrew)
