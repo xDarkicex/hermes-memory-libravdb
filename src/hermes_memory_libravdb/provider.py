@@ -165,14 +165,17 @@ def _resolve_tls_mode(endpoint: str, tls_mode: str | None) -> str:
     return "tls"
 
 
-def _read_pem_file(path: str | None) -> bytes | None:
-    """Read a PEM file, returning ``None`` if the path is empty or unreadable."""
+def _read_pem_file(path: str | None, label: str) -> bytes | None:
+    """Read a configured PEM file, failing closed when the path is invalid."""
     if not path:
         return None
     try:
-        return Path(path).read_bytes()
-    except Exception:
-        return None
+        data = Path(path).read_bytes()
+    except Exception as exc:
+        raise RuntimeError(f"Unable to read {label} at {path!r}") from exc
+    if not data:
+        raise RuntimeError(f"{label} at {path!r} is empty")
+    return data
 
 
 class _GrpcChannel:
@@ -215,9 +218,15 @@ class _GrpcChannel:
             return grpc.insecure_channel(target)
 
         # Build TLS credentials
-        root_certs = _read_pem_file(self._tls_ca_path)
-        private_key = _read_pem_file(self._tls_client_key_path)
-        cert_chain = _read_pem_file(self._tls_client_cert_path)
+        root_certs = _read_pem_file(self._tls_ca_path, "grpcEndpointTlsCa")
+        private_key = _read_pem_file(
+            self._tls_client_key_path,
+            "grpcEndpointTlsClientKey",
+        )
+        cert_chain = _read_pem_file(
+            self._tls_client_cert_path,
+            "grpcEndpointTlsClientCert",
+        )
 
         creds = grpc.ssl_channel_credentials(
             root_certificates=root_certs,

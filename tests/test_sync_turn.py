@@ -1,6 +1,8 @@
 import time
 from unittest.mock import MagicMock
 
+import pytest
+
 from hermes_memory_libravdb.provider import _NonceState, _GrpcChannel, LibraVDBMemoryProvider
 
 
@@ -47,6 +49,33 @@ class TestHealthNonceExtraction:
         assert nonce_state.should_sign("SomeMethod") is True
 
         assert nonce_state.should_sign("Health") is False
+
+
+class TestTLSCredentialLoading:
+    def test_missing_configured_tls_ca_fails_closed(self, tmp_path):
+        channel = _GrpcChannel(
+            endpoint="tcp:remote.example:443",
+            secret=None,
+            tls_ca_path=str(tmp_path / "missing-ca.pem"),
+        )
+
+        with pytest.raises(RuntimeError, match="grpcEndpointTlsCa"):
+            channel._create_channel()
+
+    def test_empty_configured_tls_client_key_fails_closed(self, tmp_path):
+        cert = tmp_path / "client.crt"
+        key = tmp_path / "client.key"
+        cert.write_text("cert")
+        key.write_text("")
+        channel = _GrpcChannel(
+            endpoint="tcp:remote.example:443",
+            secret=None,
+            tls_client_cert_path=str(cert),
+            tls_client_key_path=str(key),
+        )
+
+        with pytest.raises(RuntimeError, match="grpcEndpointTlsClientKey"):
+            channel._create_channel()
 
 
 class TestSyncTurnReturnsImmediately:
