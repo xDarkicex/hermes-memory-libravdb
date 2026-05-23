@@ -243,12 +243,11 @@ class _GrpcChannel:
         """
         try:
             stub = self._get_stub()
-            resp = stub.Health(
+            resp, call = stub.Health.with_call(
                 pb.HealthRequest(),
                 timeout=self._timeout_ms / 1000,
             )
-            metadata = resp.initial_metadata()
-            nonce = metadata.get("x-libravdb-nonce") if metadata else None
+            nonce = self._extract_nonce_from_metadata(call.initial_metadata())
             if nonce:
                 self._nonce_state.update_nonce(nonce)
             else:
@@ -282,8 +281,12 @@ class _GrpcChannel:
             metadata = self._nonce_state.build_metadata(method_name)
             stub = self._get_stub()
             method = getattr(stub, method_name)
-            resp = method(req, metadata=metadata, timeout=self._timeout_ms / 1000)
-            self._update_nonce_from_response(resp)
+            resp, call = method.with_call(
+                req,
+                metadata=metadata,
+                timeout=self._timeout_ms / 1000,
+            )
+            self._update_nonce_from_metadata(call.initial_metadata())
             return resp
         except grpc.RpcError:
             if self._nonce_state.has_secret() and self._nonce_state.has_nonce():
@@ -296,20 +299,38 @@ class _GrpcChannel:
         """Health RPC — bypasses the mutex, serves as the nonce bootstrap path."""
         try:
             stub = self._get_stub()
-            resp = stub.Health(req, timeout=self._timeout_ms / 1000)
-            self._update_nonce_from_response(resp)
+            resp, call = stub.Health.with_call(
+                req,
+                timeout=self._timeout_ms / 1000,
+            )
+            self._update_nonce_from_metadata(call.initial_metadata())
             return resp
         except grpc.RpcError:
             raise
 
     def _update_nonce_from_response(self, resp, method_name: str = ""):
+        """Compatibility shim for tests and older fake stubs."""
         try:
             metadata = resp.initial_metadata()
-            nonce = metadata.get("x-libravdb-nonce") if metadata else None
-            if nonce:
-                self._nonce_state.update_nonce(nonce)
+            self._update_nonce_from_metadata(metadata)
         except Exception:
             pass
+
+    def _update_nonce_from_metadata(self, metadata) -> None:
+        nonce = self._extract_nonce_from_metadata(metadata)
+        if nonce:
+            self._nonce_state.update_nonce(nonce)
+
+    @staticmethod
+    def _extract_nonce_from_metadata(metadata) -> str | None:
+        if not metadata:
+            return None
+        if hasattr(metadata, "get"):
+            return metadata.get("x-libravdb-nonce")
+        for key, value in metadata:
+            if str(key).lower() == "x-libravdb-nonce":
+                return value
+        return None
 
     def health(self) -> pb.HealthResponse:
         return self._call("Health", pb.HealthRequest())

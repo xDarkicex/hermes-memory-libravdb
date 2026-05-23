@@ -1,6 +1,8 @@
 import time
 from unittest.mock import MagicMock
 
+from libravdb.ipc.v1 import rpc_pb2 as pb
+
 from hermes_memory_libravdb.provider import _NonceState, _GrpcChannel, LibraVDBMemoryProvider
 
 
@@ -47,6 +49,32 @@ class TestHealthNonceExtraction:
         assert nonce_state.should_sign("SomeMethod") is True
 
         assert nonce_state.should_sign("Health") is False
+
+    def test_authenticated_call_bootstraps_nonce_from_grpc_call_metadata(self):
+        """Unary gRPC metadata lives on the call object returned by with_call."""
+        channel = _GrpcChannel(endpoint="unix:/tmp/test.sock", secret="test-secret")
+
+        health_call = MagicMock()
+        health_call.initial_metadata.return_value = (
+            ("x-libravdb-nonce", "nonce-1"),
+        )
+        status_call = MagicMock()
+        status_call.initial_metadata.return_value = (
+            ("x-libravdb-nonce", "nonce-2"),
+        )
+        status_resp = MagicMock()
+
+        stub = MagicMock()
+        stub.Health.with_call.return_value = (MagicMock(), health_call)
+        stub.Status.with_call.return_value = (status_resp, status_call)
+        channel._stub = stub
+
+        assert channel._call("Status", pb.MemoryStatusRequest()) is status_resp
+
+        metadata = stub.Status.with_call.call_args.kwargs["metadata"]
+        assert ("x-libravdb-nonce", "nonce-1") in metadata
+        assert any(key == "x-libravdb-auth" for key, _ in metadata)
+        assert channel._nonce_state.get_nonce() == "nonce-2"
 
 
 class TestSyncTurnReturnsImmediately:
