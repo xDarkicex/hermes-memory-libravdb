@@ -714,21 +714,216 @@ class LibraVDBMemoryProvider:
     def on_turn_start(self, turn: Any, message: Any, **kwargs) -> None:
         logger.debug("LibraVDB on_turn_start: turn=%s", turn)
 
-    # TODO: implement
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
-        return ""
+        """Persist key conversation context before Hermes compresses or resets.
 
-    # TODO: implement
+        Hermes calls this before discarding mid-conversation turns during
+        context compression.  We extract the last few substantive messages
+        and push them to the daemon so the session summary stays coherent.
+
+        Returns a brief note for the system prompt; the actual persistence
+        is fire-and-forget to avoid blocking the compression path.
+        """
+        if not self._channel or not messages:
+            return ""
+
+        # Grab the last few messages that carry signal — skip tool calls and
+        # very short content.
+        substantive: list[str] = []
+        for msg in reversed(messages):
+            if len(substantive) >= 6:
+                break
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role", "")).lower()
+            content = str(msg.get("content", ""))
+            if role in ("tool", "system"):
+                continue
+            if len(content) < 80:
+                continue
+            substantive.append(content)
+
+        if substantive:
+            text = "\n---\n".join(reversed(substantive))
+            queue = IngestQueue(
+                channel=self._channel,
+                user_id=self.user_id,
+                session_id=self._session_id,
+            )
+            threading.Thread(
+                target=lambda: queue.enqueue(text[:4096], role="system"),
+                daemon=True,
+            ).start()
+
+        return (
+            "# LibraVDB\n"
+            "Pre-compression context has been persisted to the external memory "
+            "backend for continuity across compressions."
+        )
+
     def on_memory_write(self, action: str, target: str, content: str, metadata: Any = None) -> None:
-        logger.debug("LibraVDB on_memory_write: action=%s target=%s", action, target)
+        """Mirror Hermes built-in persistent memory writes into LibraVDB.
 
-    # TODO: implement
+        Called when the user or agent writes to MEMORY.md, USER.md, or other
+        Hermes-native memory targets.  We persist the curated memory so the
+        daemon can retrieve it via exact recall and cross-session search.
+
+        Skip low-signal targets and empty content — only persist durable,
+        curated memory that should survive session boundaries.
+        """
+        if not self._channel or not content.strip():
+            return
+
+        if not self._writes_enabled:
+            return
+
+        # Only mirror durable memory targets
+        durable_targets = ("MEMORY.md", "USER.md", "memory")
+        target_lower = target.lower() if target else ""
+        if not any(t in target_lower for t in durable_targets):
+            return
+
+        if action == "delete":
+            # Emit a lightweight supersede hint — the daemon can decay previous
+            # entries for this target.  We do not have the old_id/new_id for the
+            # full MarkMemorySuperseded RPC, so we use an ingest with empty
+            # content as a tombstone signal.
+            try:
+                self._channel._call(
+                    "IngestMessageKernel",
+                    pb.IngestMessageKernelRequest(
+                        session_id=self._session_id,
+                        session_key=self._session_key,
+                        user_id=self.user_id,
+                        message=pb.KernelMessage(
+                            role="memory",
+                            content=f"[deleted] target={target}",
+                        ),
+                    ),
+                )
+            except Exception as exc:
+                logger.debug("LibraVDB on_memory_write delete failed: %s", exc)
+            return
+
+        # write or update — persist as a curated memory entry
+        prefix = f"[{target}]"
+        body = f"{prefix}\n{content.strip()}"
+        try:
+            self._channel._call(
+                "IngestMessageKernel",
+                pb.IngestMessageKernelRequest(
+                    session_id=self._session_id,
+                    session_key=self._session_key,
+                    user_id=self.user_id,
+                    message=pb.KernelMessage(role="memory", content=body[:8192]),
+                ),
+            )
+        except Exception as exc:
+            logger.debug("LibraVDB on_memory_write failed: %s", exc)
+
     def on_delegation(self, task: Any, result: Any, **kwargs) -> None:
-        logger.debug("LibraVDB on_delegation: task=%s", task)
+        """Emit delegation lifecycle hint and ingest subagent task for cross-session recall.
 
-    # TODO: implement
+        Hermes calls this after each subagent delegation completes.  We emit a
+        lightweight lifecycle event and persist the task content so the daemon
+        can link parent/child sessions.
+        """
+        if not self._channel:
+            return
+
+        task_desc = ""
+        subagent = ""
+        if isinstance(task, dict):
+            task_desc = str(task.get("description", task.get("prompt", "")))
+            subagent = str(task.get("subagent_name", task.get("subagent", task.get("name", ""))))
+        elif isinstance(task, str):
+            task_desc = task
+
+        result_text = ""
+        if isinstance(result, dict):
+            result_text = str(result.get("response", result.get("result", result.get("content", ""))))
+        elif isinstance(result, str):
+            result_text = result
+
+        try:
+            self._channel._call(
+                "SessionLifecycleHint",
+                pb.SessionLifecycleHintRequest(
+                    hook="delegation",
+                    session_id=self._session_id,
+                    session_key=self._session_key,
+                    reason=task_desc[:512] if task_desc else "",
+                    agent_id=subagent,
+                ),
+            )
+        except Exception as exc:
+            logger.debug("LibraVDB on_delegation hint failed: %s", exc)
+
+        # Persist delegation content so the daemon indexes it for future recall
+        if task_desc or result_text:
+            queue = IngestQueue(
+                channel=self._channel,
+                user_id=self.user_id,
+                session_id=self._session_id,
+            )
+            content_parts = []
+            if subagent:
+                content_parts.append(f"[subagent:{subagent}]")
+            if task_desc:
+                content_parts.append(task_desc[:2048])
+            if result_text:
+                content_parts.append(result_text[:4096])
+            delegation_content = "\n".join(content_parts)
+            if delegation_content.strip():
+                threading.Thread(
+                    target=lambda: queue.enqueue(delegation_content, role="system"),
+                    daemon=True,
+                ).start()
+
     def queue_prefetch(self, query: str, session_id: str = "") -> None:
-        logger.debug("LibraVDB queue_prefetch: query=%s session_id=%s", query, session_id)
+        """Pre-warm the daemon side-channel for the next-turn retrieval.
+
+        Hermes calls this after each turn with the latest user query so the
+        provider can warm caches in the background.  We run a lightweight
+        search through the daemon to populate its internal LRU/vector cache
+        so the next synchronous ``prefetch`` call returns with minimal latency.
+        """
+        if not self._channel or not query.strip():
+            return
+        session = session_id or self._session_id
+        threading.Thread(
+            target=self._prefetch_warm,
+            args=(query, session),
+            daemon=True,
+        ).start()
+
+    def _prefetch_warm(self, query: str, session: str) -> None:
+        """Background search to populate daemon-side caches."""
+        try:
+            collections = resolve_search_scopes(
+                user_id=self.user_id,
+                session_id=session,
+                cross_session_recall=self._cross_session_recall,
+                use_session_summary_search=self._use_session_summary_search,
+                use_session_recall_projection=self._use_session_recall_projection,
+            )
+            if not collections:
+                return
+            if len(collections) == 1:
+                self._channel._call("SearchText", pb.SearchTextRequest(
+                    collection=collections[0],
+                    text=query,
+                    k=self._top_k,
+                ))
+            else:
+                self._channel._call("SearchTextCollections", pb.SearchTextCollectionsRequest(
+                    collections=collections,
+                    text=query,
+                    k=self._top_k,
+                    exclude_by_collection={},
+                ))
+        except Exception:
+            pass  # best-effort background warming
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         if not self._channel:
