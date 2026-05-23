@@ -136,6 +136,7 @@ Set `memory.provider: "libravdb"` in Hermes `config.yaml` to activate. Run `herm
 ## Docs By Goal
 
 - New install: [Install](./docs/install.md)
+- Verify your setup: [Beta Tester Checklist](./docs/beta-checklist.md)
 - Understand the design: [Architecture](./docs/architecture.md)
 - How it fits Hermes: [Hermes Integration](./docs/hermes-integration.md)
 - Configure: [Configuration](./docs/configuration.md), [TLS configuration](./docs/TLS_configuration.md)
