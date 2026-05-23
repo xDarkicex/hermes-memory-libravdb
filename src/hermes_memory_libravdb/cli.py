@@ -25,8 +25,10 @@ def _load_cli_config() -> dict:
         return {}
     try:
         return json.loads(config_path.read_text())
-    except Exception:
-        return {}
+    except Exception as exc:
+        raise RuntimeError(
+            f"Unable to load LibraVDB config from {config_path}"
+        ) from exc
 
 
 def _create_cli_channel() -> _GrpcChannel:

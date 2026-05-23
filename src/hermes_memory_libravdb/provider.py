@@ -331,9 +331,13 @@ class LibraVDBMemoryProvider(MemoryProvider):
         self._session_id = ""
         self._session_key = ""
         self._resolved_identity: ResolvedIdentity | None = None
-        self._writes_enabled = True
         self._startup_error: str | None = None
-        self._config = self._load_config()
+        self._writes_enabled = True
+        try:
+            self._config = self._load_config()
+        except Exception as exc:
+            self._startup_error = str(exc)
+            self._config = {}
         # Cached daemon status fields (refreshed via _fetch_daemon_status)
         self._cached_gating_threshold: float | None = None
         self._status_fetched_at: float = 0.0
@@ -347,8 +351,10 @@ class LibraVDBMemoryProvider(MemoryProvider):
         try:
             import json
             return json.loads(config_path.read_text())
-        except Exception:
-            return {}
+        except Exception as exc:
+            raise RuntimeError(
+                f"Unable to load LibraVDB config from {config_path}"
+            ) from exc
 
     @property
     def name(self) -> str:
@@ -438,6 +444,9 @@ class LibraVDBMemoryProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs) -> None:
         self._session_id = session_id
         self._session_key = session_id
+        if self._startup_error:
+            self._channel = None
+            return
         # Resolve identity: explicit user_id arg wins, else auto-derive
         explicit_user_id = str(kwargs.get("user_id") or "").strip() or None
         self._resolved_identity = resolve_identity(
@@ -446,7 +455,6 @@ class LibraVDBMemoryProvider(MemoryProvider):
             session_key=session_id,
         )
         self._writes_enabled = str(kwargs.get("agent_context") or "primary") == "primary"
-        self._startup_error = None
 
         # ── Runtime config (ported from openclaw-memory-libravdb PluginConfig) ──
         cfg = self._config

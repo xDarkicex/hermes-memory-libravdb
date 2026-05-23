@@ -51,3 +51,16 @@ class TestCLIRegistersSubcommands:
         args = parser.parse_args(["search", "my query"])
         assert args.query == "my query"
         assert args.libravdb_subcommand == "search"
+
+
+class TestCLIConfigLoading:
+    def test_invalid_cli_config_fails_closed(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "libravdb.json").write_text("{not json")
+
+        try:
+            cli._load_cli_config()
+        except RuntimeError as exc:
+            assert "Unable to load LibraVDB config" in str(exc)
+        else:
+            raise AssertionError("invalid config must fail closed")
