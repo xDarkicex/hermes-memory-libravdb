@@ -54,11 +54,11 @@ _SOCKET_CANDIDATE_DIRS = [
 
 
 def _resolve_endpoint(endpoint: str | None = None) -> str:
-    if endpoint and endpoint != "auto":
-        return endpoint
     env_endpoint = os.environ.get("LIBRAVDB_GRPC_ENDPOINT")
     if env_endpoint:
         return env_endpoint
+    if endpoint and endpoint != "auto":
+        return endpoint
     # Probe candidate socket directories (matching TS resolveClientEndpoint)
     for candidate_dir in _SOCKET_CANDIDATE_DIRS:
         sock_path = os.path.join(candidate_dir, "libravdb.sock")

@@ -1,7 +1,12 @@
 import time
 from unittest.mock import MagicMock
 
-from hermes_memory_libravdb.provider import _NonceState, _GrpcChannel, LibraVDBMemoryProvider
+from hermes_memory_libravdb.provider import (
+    _NonceState,
+    _GrpcChannel,
+    _resolve_transport_config,
+    LibraVDBMemoryProvider,
+)
 
 
 class TestHealthNonceExtraction:
@@ -47,6 +52,15 @@ class TestHealthNonceExtraction:
         assert nonce_state.should_sign("SomeMethod") is True
 
         assert nonce_state.should_sign("Health") is False
+
+
+class TestTransportConfig:
+    def test_env_endpoint_overrides_config_endpoint(self, monkeypatch):
+        monkeypatch.setenv("LIBRAVDB_GRPC_ENDPOINT", "tcp:secure.example:443")
+
+        transport = _resolve_transport_config({"endpoint": "tcp:127.0.0.1:37421"})
+
+        assert transport["endpoint"] == "tcp:secure.example:443"
 
 
 class TestSyncTurnReturnsImmediately:
