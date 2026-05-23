@@ -3,11 +3,20 @@
 Validates that register() works with both _ProviderCollector (directory load
 path) and real PluginContext (entry-point path), that class inheritance
 matches the ABCs, and that CLI discovery functions correctly.
+
+These tests require hermes-agent to be installed.  When running in CI without
+Hermes they are skipped automatically.
 """
 
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+# Skip entire module if Hermes is not installed (CI, linting)
+pytest.importorskip("hermes_cli.plugins", reason="hermes-agent not installed")
+pytest.importorskip("plugins.memory", reason="hermes-agent not installed")
+pytest.importorskip("agent.context_engine", reason="hermes-agent not installed")
+pytest.importorskip("agent.memory_provider", reason="hermes-agent not installed")
 
 
 # ---------------------------------------------------------------------------

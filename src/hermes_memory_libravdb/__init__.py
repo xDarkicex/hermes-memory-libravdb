@@ -4,7 +4,10 @@ import logging
 import re
 from typing import Any
 
-from agent.context_engine import ContextEngine
+try:
+    from agent.context_engine import ContextEngine
+except ImportError:
+    ContextEngine = object  # fallback when hermes-agent not installed (CI, linting)
 
 from .provider import (
     LibraVDBMemoryProvider,

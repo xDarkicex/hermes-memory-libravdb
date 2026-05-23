@@ -14,7 +14,10 @@ import grpc
 from libravdb.ipc.v1 import rpc_pb2 as pb
 from libravdb.ipc.v1 import rpc_pb2_grpc as services
 
-from agent.memory_provider import MemoryProvider
+try:
+    from agent.memory_provider import MemoryProvider
+except ImportError:
+    MemoryProvider = object  # fallback when hermes-agent not installed (CI, linting)
 
 from .identity import resolve_identity, ResolvedIdentity
 from .scopes import (
