@@ -3,6 +3,7 @@ import json
 import pytest
 
 from hermes_memory_libravdb.identity import resolve_identity
+from hermes_memory_libravdb.provider import LibraVDBMemoryProvider
 from hermes_memory_libravdb.scopes import user_collection
 
 
@@ -39,3 +40,29 @@ def test_invalid_persisted_user_id_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="Invalid collection name"):
         resolve_identity(hermes_home=tmp_path)
+
+
+def test_provider_degrades_on_invalid_config_user_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "libravdb.json").write_text(
+        json.dumps({"userId": "not valid"})
+    )
+
+    provider = LibraVDBMemoryProvider()
+    provider.initialize("session")
+
+    assert provider._channel is None
+    assert "Invalid LibraVDB identity config" in provider.system_prompt_block()
+
+
+def test_provider_degrades_on_invalid_persisted_user_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "libravdb-identity.json").write_text(
+        json.dumps({"userId": "123bad"})
+    )
+
+    provider = LibraVDBMemoryProvider()
+    provider.initialize("session")
+
+    assert provider._channel is None
+    assert "Invalid LibraVDB identity config" in provider.system_prompt_block()
