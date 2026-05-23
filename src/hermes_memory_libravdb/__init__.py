@@ -10,12 +10,12 @@ from .provider import (
     _resolve_endpoint,
     _resolve_transport_config,
     _load_secret,
-    register,
 )
 from .identity import resolve_identity, ResolvedIdentity
 from .scopes import (
     resolve_search_scopes,
     resolve_exact_recall_collections,
+    resolve_durable_namespace,
     validate_collection_name,
 )
 
@@ -29,6 +29,8 @@ __all__ = [
     "resolve_identity",
     "ResolvedIdentity",
     "resolve_search_scopes",
+    "resolve_exact_recall_collections",
+    "resolve_durable_namespace",
     "resolve_exact_recall_collections",
     "validate_collection_name",
 ]
@@ -121,6 +123,65 @@ def _on_session_start(session_id: str = "", **kwargs) -> None:
     if _provider_instance is not None:
         _provider_instance._session_id = session_id
         _provider_instance._session_key = session_id
+        # Emit session_start lifecycle hint to the daemon
+        if _provider_instance._channel:
+            try:
+                from libravdb.ipc.v1 import rpc_pb2 as pb
+                agent_id = kwargs.get("agent_id", "")
+                workspace_dir = kwargs.get("workspace_dir", "")
+                _provider_instance._channel._call(
+                    "SessionLifecycleHint",
+                    pb.SessionLifecycleHintRequest(
+                        hook="session_start",
+                        session_id=session_id,
+                        session_key=session_id,
+                        agent_id=agent_id if isinstance(agent_id, str) else str(agent_id or ""),
+                        workspace_dir=workspace_dir if isinstance(workspace_dir, str) else str(workspace_dir or ""),
+                    ),
+                )
+            except Exception:
+                pass
+
+
+def _on_before_reset(event: Any = None, ctx: Any = None, **kwargs) -> None:
+    """Emit before_reset lifecycle hint so the daemon can snapshot/checkpoint."""
+    if _provider_instance is None or not _provider_instance._channel:
+        return
+    try:
+        from libravdb.ipc.v1 import rpc_pb2 as pb
+
+        session_id = ""
+        session_key = ""
+        reason = ""
+        session_file = ""
+        message_count = 0
+
+        if isinstance(ctx, dict):
+            session_id = str(ctx.get("sessionId") or ctx.get("session_id") or "")
+            session_key = str(ctx.get("sessionKey") or ctx.get("session_key") or "")
+        if isinstance(event, dict):
+            reason = str(event.get("reason") or "")
+            session_file = str(event.get("sessionFile") or event.get("session_file") or "")
+            messages = event.get("messages")
+            if isinstance(messages, list):
+                message_count = len(messages)
+
+        session_id = session_id or (_provider_instance._session_id if _provider_instance else "")
+        session_key = session_key or (_provider_instance._session_key if _provider_instance else "")
+
+        _provider_instance._channel._call(
+            "SessionLifecycleHint",
+            pb.SessionLifecycleHintRequest(
+                hook="before_reset",
+                session_id=session_id,
+                session_key=session_key,
+                reason=reason,
+                session_file=session_file,
+                message_count=message_count,
+            ),
+        )
+    except Exception:
+        pass
 
 
 def _on_session_end(session_id: str = "", completed: bool = False, **kwargs) -> None:
@@ -166,6 +227,8 @@ class _LibraVDBContextEngine:
     All heavy processing (compaction, token budget, exact recall) is handled
     by the daemon — this class translates Hermes calls into proper RPC requests.
     """
+
+    name: str = "libravdb"
 
     def __init__(self, provider: LibraVDBMemoryProvider):
         self._provider = provider

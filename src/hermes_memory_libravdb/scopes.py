@@ -8,8 +8,13 @@ __all__ = [
     "user_collection",
     "session_collection",
     "resolve_search_scopes",
+    "resolve_exact_recall_collections",
+    "resolve_durable_namespace",
     "CollectionScope",
     "SEARCH_SCOPES_ALL",
+    "USER_COLLECTION_PREFIX",
+    "SESSION_KEY_PREFIX",
+    "AGENT_ID_PREFIX",
 ]
 
 # Must start with a letter, then up to 127 chars of alphanumeric/_.:@#-
@@ -19,7 +24,15 @@ USER_COLLECTION_PREFIX = "user:"
 SESSION_COLLECTION_PREFIX = "session:"
 SESSION_SUMMARY_PREFIX = "session_summary:"
 SESSION_RECALL_PREFIX = "session_recall:"
+SESSION_KEY_PREFIX = "session-key:"
+AGENT_ID_PREFIX = "agent-id:"
 GLOBAL_COLLECTION = "global"
+
+RESERVED_NAMESPACE_PREFIXES = (
+    SESSION_KEY_PREFIX,
+    AGENT_ID_PREFIX,
+    USER_COLLECTION_PREFIX,
+)
 
 CollectionScope = Literal["session", "user", "global"]
 
@@ -105,6 +118,48 @@ def resolve_exact_recall_collections(
     if not cross_session_recall:
         return []
     return [user_collection(user_id), GLOBAL_COLLECTION]
+
+
+def resolve_durable_namespace(
+    user_id: str | None = None,
+    session_key: str | None = None,
+    agent_id: str | None = None,
+    fallback: str | None = None,
+) -> str:
+    """Resolve a durable namespace from explicit config or auto-derived identity.
+
+    Priority: explicit userId → session-key: prefix → agent-id: prefix → fallback → "default".
+    Validates that explicit userId does not collide with reserved prefixes.
+    """
+    explicit = _first_non_empty(user_id)
+    if explicit:
+        for prefix in RESERVED_NAMESPACE_PREFIXES:
+            if explicit.startswith(prefix):
+                raise ValueError(
+                    f"Invalid userId {explicit!r}: must not start with reserved prefix {prefix!r}"
+                )
+        return validate_collection_name(explicit)
+
+    sk = _first_non_empty(session_key)
+    if sk:
+        return validate_collection_name(f"{SESSION_KEY_PREFIX}{sk}")
+
+    aid = _first_non_empty(agent_id)
+    if aid:
+        return validate_collection_name(f"{AGENT_ID_PREFIX}{aid}")
+
+    fb = _first_non_empty(fallback)
+    if fb:
+        return validate_collection_name(fb)
+
+    return "default"
+
+
+def _first_non_empty(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed if trimmed else None
 
 
 # Sentinel for "search all available scopes"

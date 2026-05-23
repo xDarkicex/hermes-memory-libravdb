@@ -14,7 +14,7 @@ from .provider import (
 )
 from .identity import resolve_identity
 from .markdown_ingest import MarkdownIngestionHandle
-from .scopes import user_collection, resolve_search_scopes
+from .scopes import user_collection, resolve_search_scopes, resolve_durable_namespace
 from libravdb.ipc.v1 import rpc_pb2 as pb
 
 
@@ -112,13 +112,53 @@ def _cli_list_collections(channel, collection_patterns: list[str]) -> list[dict]
     return results
 
 
-def _cli_status_deep(rebuild_index: bool = False) -> dict:
+def _cli_index(user_id: str | None, session_key: str | None, collections: str | None, force: bool) -> dict:
+    """Rebuild the vector index. Requires --force confirmation."""
+    if not force:
+        return {"ok": False, "error": "Index rebuild requires --force. This re-embeds all stored documents and may be slow."}
+
+    channel = _create_cli_channel()
+    try:
+        namespace = ""
+        if user_id:
+            namespace = user_id
+        elif session_key:
+            namespace = resolve_durable_namespace(session_key=session_key)
+        coll_list = None
+        if collections:
+            coll_list = [c.strip() for c in collections.split(",") if c.strip()]
+
+        req = pb.RebuildIndexRequest(namespace=namespace)
+        if coll_list:
+            req.collections.extend(coll_list)
+
+        resp = channel._call("RebuildIndex", req)
+        channel.close()
+        return {
+            "ok": True,
+            "collections_processed": getattr(resp, "collections_processed", 0),
+            "records_reindexed": getattr(resp, "records_reindexed", 0),
+            "collections_recreated": getattr(resp, "collections_recreated", 0),
+            "errors": list(getattr(resp, "errors", [])),
+        }
+    except Exception as e:
+        channel.close()
+        return {"ok": False, "error": str(e)}
+
+
+def _cli_status_deep(rebuild_index: bool = False, force: bool = False) -> dict:
     channel = _create_cli_channel()
     identity = resolve_identity()
     resolved_user_id = identity.user_id
     try:
-        # Optionally rebuild index first
+        # Optionally rebuild index first (requires --force)
         if rebuild_index:
+            if not force:
+                channel.close()
+                return {
+                    "ok": False,
+                    "error": "status --index performs an index rebuild. Re-run with --force to continue.",
+                }
             try:
                 index_resp = channel._call(
                     "RebuildIndex",
@@ -294,7 +334,8 @@ def libravdb_command(args) -> None:
 
     if subcommand == "status":
         if getattr(args, "index", False):
-            result = _cli_status_deep(rebuild_index=True)
+            force = getattr(args, "force", False)
+            result = _cli_status_deep(rebuild_index=True, force=force)
             print(json.dumps(result, indent=2))
             return
         if getattr(args, "deep", False):
@@ -302,6 +343,15 @@ def libravdb_command(args) -> None:
             print(json.dumps(result, indent=2))
             return
         result = _cli_status()
+        print(json.dumps(result, indent=2))
+        return
+
+    if subcommand == "index":
+        user_id = getattr(args, "user_id", None)
+        session_key = getattr(args, "session_key", None)
+        collections = getattr(args, "collections", None)
+        force = getattr(args, "force", False)
+        result = _cli_index(user_id, session_key, collections, force)
         print(json.dumps(result, indent=2))
         return
 
@@ -355,17 +405,19 @@ def libravdb_command(args) -> None:
 
     if subcommand == "flush":
         user_id = getattr(args, "user_id", None)
-        if not user_id:
-            print(json.dumps({"error": "--user-id is required"}))
+        session_key = getattr(args, "session_key", None)
+        if not user_id and not session_key:
+            print(json.dumps({"error": "--user-id or --session-key is required"}))
             return
-        print(f"Flushing namespace for user-id={user_id} ... (ctrl-c to abort)")
+        namespace = user_id if user_id else resolve_durable_namespace(session_key=session_key)
+        print(f"Flushing namespace {namespace} ... (ctrl-c to abort)")
         try:
             input("Press Enter to confirm: ")
         except EOFError:
             pass
         channel = _create_cli_channel()
         try:
-            resp = channel._call("FlushNamespace", pb.FlushNamespaceRequest(user_id=user_id, namespace=""))
+            resp = channel._call("FlushNamespace", pb.FlushNamespaceRequest(user_id=namespace, namespace=""))
             channel.close()
             print(json.dumps({"ok": resp.ok if hasattr(resp, "ok") else True}))
         except Exception as e:
@@ -375,12 +427,14 @@ def libravdb_command(args) -> None:
 
     if subcommand == "export":
         user_id = getattr(args, "user_id", None)
-        if not user_id:
-            print(json.dumps({"error": "--user-id is required"}))
+        session_key = getattr(args, "session_key", None)
+        if not user_id and not session_key:
+            print(json.dumps({"error": "--user-id or --session-key is required"}))
             return
+        namespace = user_id if user_id else resolve_durable_namespace(session_key=session_key)
         channel = _create_cli_channel()
         try:
-            resp = channel._call("ExportMemory", pb.ExportMemoryRequest(user_id=user_id, namespace=""))
+            resp = channel._call("ExportMemory", pb.ExportMemoryRequest(user_id=namespace, namespace=""))
             channel.close()
             if hasattr(resp, "records"):
                 for rec in resp.records:
@@ -474,7 +528,7 @@ def libravdb_command(args) -> None:
         print("Usage: hermes libravdb markdown-ingest <status|scan>")
         return
 
-    print("Usage: hermes libravdb <status|health|search|flush|export|journal|dream-promote|markdown-ingest>")
+    print("Usage: hermes libravdb <status|index|health|search|flush|export|journal|dream-promote|markdown-ingest>")
 
 
 def register_cli(subparser) -> None:
@@ -484,7 +538,15 @@ def register_cli(subparser) -> None:
     status = subs.add_parser("status", help="Show LibraVDB daemon status")
     status.add_argument("--deep", action="store_true", help="Probe all collections and report per-collection document count and index health")
     status.add_argument("--index", action="store_true", help="Rebuild the index before running status")
+    status.add_argument("--force", action="store_true", help="Required with --index: confirm index rebuild")
     status.set_defaults(func=libravdb_command)
+
+    index_cmd = subs.add_parser("index", help="Rebuild LibraVDB memory vector index (requires --force)")
+    index_cmd.add_argument("--user-id", help="User ID namespace to reindex")
+    index_cmd.add_argument("--session-key", help="Session key whose derived namespace should be reindexed")
+    index_cmd.add_argument("--collections", help="Comma-separated collection names to reindex")
+    index_cmd.add_argument("--force", action="store_true", required=True, help="Required: confirm index rebuild")
+    index_cmd.set_defaults(func=libravdb_command)
 
     health = subs.add_parser("health", help="Check daemon health")
     health.set_defaults(func=libravdb_command)
@@ -496,12 +558,14 @@ def register_cli(subparser) -> None:
     search.add_argument("--json", action="store_true", help="Print structured JSON")
     search.set_defaults(func=libravdb_command)
 
-    flush = subs.add_parser("flush", help="Wipe all data for a given user-id namespace")
-    flush.add_argument("--user-id", required=True, help="User ID namespace to wipe")
+    flush = subs.add_parser("flush", help="Wipe all data for a given namespace")
+    flush.add_argument("--user-id", help="User ID namespace to wipe")
+    flush.add_argument("--session-key", help="Session key whose derived namespace should be wiped")
     flush.set_defaults(func=libravdb_command)
 
-    export = subs.add_parser("export", help="Export all memories for a user-id as NDJSON to stdout")
-    export.add_argument("--user-id", required=True, help="User ID namespace to export")
+    export = subs.add_parser("export", help="Export all memories for a namespace as NDJSON to stdout")
+    export.add_argument("--user-id", help="User ID namespace to export")
+    export.add_argument("--session-key", help="Session key whose derived namespace should be exported")
     export.set_defaults(func=libravdb_command)
 
     journal = subs.add_parser("journal", help="Print the lifecycle journal for a session")

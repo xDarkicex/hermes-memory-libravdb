@@ -3,12 +3,11 @@
 Ported from openclaw-memory-libravdb markdown-ingest.ts and markdown-hash.ts.
 All heavy processing (tokenization, chunking, embedding) is handled by the daemon
 via IngestMarkdownDocument RPC — this module handles file discovery, change
-detection, and the RPC dispatch layer.
+detection, debounced scanning, and the chunked REPLACE/APPEND ingest queue.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -25,11 +24,16 @@ logger = logging.getLogger(__name__)
 # ── Constants (matching TypeScript reference) ────────────────────────────────
 
 DEFAULT_DEBOUNCE_MS = 150
+DEFAULT_POLL_INTERVAL_MS = 5000
 DEFAULT_TOKENIZER_ID = "markdown-ingest:v1"
 MARKDOWN_INGEST_VERSION = 3
 HASH_BACKEND = "python-fnv1a64"
 STREAM_CHUNK_BYTES = 64 * 1024
 DEFAULT_MAX_TOKENS_PER_FILE = 128_000
+
+_INGEST_CHUNK_TOKENS = 8192
+_INGEST_RETRY_BASE_DELAY_MS = 500
+_INGEST_MAX_RETRIES = 4
 
 DEFAULT_EXCLUDES = [
     "**/node_modules/**",
@@ -62,6 +66,19 @@ def _fnv1a64(data: bytes) -> str:
     for b in data:
         h ^= b
         h = (h * _FNV_PRIME) & 0xFFFFFFFFFFFFFFFF
+    return f"{h:016x}"
+
+
+def _incremental_fnv1a64(seed: int, data: bytes) -> int:
+    """Incremental FNV-1a 64-bit update. Returns updated hash value."""
+    h = seed
+    for b in data:
+        h ^= b
+        h = (h * _FNV_PRIME) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def _incremental_fnv_to_hex(h: int) -> str:
     return f"{h:016x}"
 
 
@@ -238,6 +255,299 @@ def _has_inline_obsidian_tag(text: str) -> bool:
     return False
 
 
+# ── Streamed file read with incremental FNV-1a ───────────────────────────────
+
+
+def _stream_read_file_with_hash(file_path: str, max_bytes: int) -> dict | str | None:
+    """Stream-read a file in 64KB chunks, incrementally computing FNV-1a hash.
+
+    Returns:
+        dict with ``text`` and ``fileHash`` on success,
+        ``"too_large"`` if file exceeds max_bytes,
+        ``None`` on read error.
+    """
+    try:
+        fh = open(file_path, "rb")
+    except OSError:
+        return None
+
+    try:
+        chunks: list[str] = []
+        h = _FNV_OFFSET
+        total = 0
+
+        while True:
+            data = fh.read(STREAM_CHUNK_BYTES)
+            if not data:
+                break
+            total += len(data)
+            if total > max_bytes:
+                return "too_large"
+            h = _incremental_fnv1a64(h, data)
+            chunks.append(data.decode("utf-8", errors="replace"))
+
+        return {
+            "text": "".join(chunks),
+            "fileHash": _incremental_fnv_to_hex(h),
+        }
+    finally:
+        fh.close()
+
+
+# ── Markdown ingest queue (chunked REPLACE/APPEND) ───────────────────────────
+
+
+class MarkdownIngestQueue:
+    """Chunked markdown ingest queue with REPLACE/APPEND semantics.
+
+    First chunk for a document is sent with REPLACE mode (overwrites existing),
+    subsequent chunks use APPEND. Includes retry with exponential backoff + full
+    jitter and burst feedback handling, matching the TypeScript IngestQueue.
+    """
+
+    def __init__(
+        self,
+        rpc_caller: Callable[[str, Any], Any],
+        user_id: str,
+        logger_override=None,
+        chunk_tokens: int = _INGEST_CHUNK_TOKENS,
+        retry_base_delay_ms: int = _INGEST_RETRY_BASE_DELAY_MS,
+        max_retries: int = _INGEST_MAX_RETRIES,
+    ):
+        self._rpc_caller = rpc_caller
+        self._user_id = user_id
+        self._log = logger_override or logger
+        self._chunk_tokens = max(1, int(chunk_tokens))
+        self._retry_base_delay_ms = retry_base_delay_ms
+        self._max_retries = max_retries
+
+    def enqueue_ingest(
+        self,
+        source_doc: str,
+        text: str,
+        source_root: str,
+        source_path: str,
+        source_kind: str,
+        file_hash: str,
+        source_size: int,
+        source_mtime_ms: int,
+        source_ctime_ms: int,
+        on_chunk_feedback: Callable[[dict], None] | None = None,
+    ) -> dict | None:
+        """Ingest a markdown document as one or more chunks.
+
+        Returns the last feedback dict, or None.
+        """
+        if not text.strip():
+            return None
+
+        current_limit = self._chunk_tokens
+        offset = 0
+        is_first = True
+        last_feedback: dict | None = None
+
+        while offset < len(text):
+            remaining = text[offset:]
+            chunks = _split_text_chunks(remaining, current_limit)
+            chunk_text = chunks[0]["text"]
+
+            mode = 0 if is_first else 1  # REPLACE=0, APPEND=1
+            try:
+                resp = self._ingest_with_retry(
+                    source_doc=source_doc,
+                    text=chunk_text,
+                    source_root=source_root,
+                    source_path=source_path,
+                    source_kind=source_kind,
+                    file_hash=file_hash,
+                    source_size=source_size,
+                    source_mtime_ms=source_mtime_ms,
+                    source_ctime_ms=source_ctime_ms,
+                    mode=mode,
+                )
+                fb = _extract_feedback(resp) if resp else None
+                last_feedback = fb
+
+                if fb:
+                    if on_chunk_feedback:
+                        on_chunk_feedback(fb)
+
+                    # Burst limit: daemon told us to use smaller chunks
+                    if (
+                        fb.get("nodesAccepted", 0) == 0
+                        and fb.get("tokenBurstLimit", 0) > 0
+                        and fb["tokenBurstLimit"] < current_limit
+                    ):
+                        current_limit = fb["tokenBurstLimit"]
+                        continue
+
+                    if fb.get("nodesAccepted", 0) == 0:
+                        self._log.warning(
+                            "[markdown-ingest-queue] Chunk permanently rejected for %s "
+                            "at offset=%d length=%d tokenBurstLimit=%s",
+                            source_doc, offset, len(chunk_text),
+                            fb.get("tokenBurstLimit", "unset"),
+                        )
+
+                offset += len(chunk_text)
+                is_first = False
+
+                # Back-pressure: wait if daemon says to pause
+                if fb and not fb.get("acceptMore", True) and offset < len(text):
+                    delay = fb.get("retryAfterMs") or 1000
+                    self._log.debug(
+                        "[markdown-ingest-queue] back-pressure: acceptMore=false — waiting %dms",
+                        delay,
+                    )
+                    time.sleep(delay / 1000)
+
+            except Exception as exc:
+                self._log.debug(
+                    "[markdown-ingest-queue] ingest chunk failed for %s at offset %d: %s",
+                    source_doc, offset, exc,
+                )
+                offset += len(chunk_text)
+                is_first = False
+
+        return last_feedback
+
+    def enqueue_delete(self, source_doc: str) -> None:
+        """Delete an authored document with retry."""
+        for attempt in range(self._max_retries + 1):
+            try:
+                req = pb.DeleteAuthoredDocumentRequest(source_doc=source_doc)
+                self._rpc_caller("DeleteAuthoredDocument", req)
+                return
+            except Exception as exc:
+                if attempt < self._max_retries:
+                    cap = self._retry_base_delay_ms * (2 ** attempt)
+                    delay = (hash(source_doc + str(attempt)) & 0xFFFF) / 0xFFFF * cap
+                    self._log.debug(
+                        "[markdown-ingest-queue] delete retry %d for %s in %.1fms",
+                        attempt, source_doc, delay,
+                    )
+                    time.sleep(delay / 1000)
+                else:
+                    raise
+
+    def _ingest_with_retry(
+        self,
+        source_doc: str,
+        text: str,
+        source_root: str,
+        source_path: str,
+        source_kind: str,
+        file_hash: str,
+        source_size: int,
+        source_mtime_ms: int,
+        source_ctime_ms: int,
+        mode: int,
+    ):
+        """Send IngestMarkdownDocument with exponential backoff retry."""
+        for attempt in range(self._max_retries + 1):
+            try:
+                req = pb.IngestMarkdownDocumentRequest(
+                    source_doc=source_doc,
+                    text=text,
+                    tokenizer_id=DEFAULT_TOKENIZER_ID,
+                    core_doc=True,
+                    user_id=self._user_id,
+                    mode=mode,
+                    source_meta=pb.MarkdownSourceMeta(
+                        source_root=source_root,
+                        source_path=source_path,
+                        source_kind=source_kind,
+                        file_hash=file_hash,
+                        source_size=source_size,
+                        source_mtime_ms=source_mtime_ms,
+                        source_ctime_ms=source_ctime_ms,
+                        ingest_version=MARKDOWN_INGEST_VERSION,
+                        hash_backend=HASH_BACKEND,
+                    ),
+                )
+                return self._rpc_caller("IngestMarkdownDocument", req)
+            except Exception as exc:
+                if attempt < self._max_retries:
+                    cap = self._retry_base_delay_ms * (2 ** attempt)
+                    delay = (hash(source_doc + str(attempt)) & 0xFFFF) / 0xFFFF * cap
+                    self._log.debug(
+                        "[markdown-ingest-queue] retry %d/%d for %s mode=%d in %.1fms: %s",
+                        attempt + 1, self._max_retries, source_doc, mode, delay, exc,
+                    )
+                    time.sleep(delay / 1000)
+                else:
+                    raise
+
+
+def _split_text_chunks(text: str, max_tokens: int) -> list[dict]:
+    """Split text at sentence/word boundaries to fit within max_tokens."""
+    if max_tokens <= 0:
+        return [{"text": text, "ordinal": 0}]
+    max_chars = max_tokens * 4
+    if len(text) <= max_chars:
+        return [{"text": text, "ordinal": 0}]
+
+    chunks: list[dict] = []
+    offset = 0
+    ordinal = 0
+
+    while offset < len(text):
+        end = min(offset + max_chars, len(text))
+        probe_limit = min(256, end - offset)
+        hard_cut = end
+
+        # Look for double-newline boundary
+        for i in range(probe_limit):
+            pos = end - i
+            if text[pos - 1 : pos + 1] == "\n\n" and pos + 1 <= len(text):
+                hard_cut = pos + 1
+                break
+
+        # Fall back to single newline
+        if hard_cut == end:
+            for i in range(probe_limit):
+                pos = end - i
+                if pos > 0 and text[pos - 1] == "\n":
+                    hard_cut = pos
+                    break
+
+        # Fall back to space
+        if hard_cut == end:
+            for i in range(probe_limit):
+                pos = end - i
+                if pos > 0 and text[pos - 1] == " ":
+                    hard_cut = pos
+                    break
+
+        chunk_text = text[offset:hard_cut]
+        if chunk_text.strip():
+            chunks.append({"text": chunk_text, "ordinal": ordinal})
+        offset = hard_cut
+        ordinal += 1
+
+    return chunks
+
+
+def _extract_feedback(resp) -> dict | None:
+    """Extract IngestFeedback fields from an RPC response."""
+    if not resp or not hasattr(resp, "feedback") or not resp.feedback:
+        return None
+    fb = resp.feedback
+    return {
+        "queueDepth": getattr(fb, "queue_depth", 0),
+        "queueCapacity": getattr(fb, "queue_capacity", 0),
+        "acceptMore": getattr(fb, "accept_more", True),
+        "retryAfterMs": getattr(fb, "retry_after_ms", 0),
+        "processingTimeUs": getattr(fb, "processing_time_us", 0),
+        "nodesAccepted": getattr(fb, "nodes_accepted", 0),
+        "nodesRejected": getattr(fb, "nodes_rejected", 0),
+        "tokensIngested": getattr(fb, "tokens_ingested", 0),
+        "tokenBurstLimit": getattr(fb, "token_burst_limit", 0),
+        "walDepth": getattr(fb, "wal_depth", 0),
+        "walCapacity": getattr(fb, "wal_capacity", 0),
+    }
+
+
 # ── Snapshot persistence ────────────────────────────────────────────────────
 
 
@@ -313,6 +623,9 @@ class SnapshotStore:
             if st.get("root") == resolved
         }
 
+    def is_dirty(self) -> bool:
+        return self._dirty
+
     @staticmethod
     def _is_valid_state(source_doc: str, state: Any) -> bool:
         if not isinstance(state, dict):
@@ -342,6 +655,68 @@ class ScanStats:
         self.files_deleted = 0
         self.sync_errors = 0
         self.files_deferred = 0
+
+
+# ── Polling directory watcher ────────────────────────────────────────────────
+
+
+class _PollingWatcher:
+    """Polling-based directory watcher for continuous markdown monitoring.
+
+    Periodically checks directory mtimes under watched roots and triggers
+    a callback when changes are detected. Equivalent to per-directory fs.watch
+    in the TypeScript plugin, but using portable polling.
+    """
+
+    def __init__(self, roots: list[str], callback: Callable[[], None], interval_ms: int = DEFAULT_POLL_INTERVAL_MS):
+        self._roots = list(roots)
+        self._callback = callback
+        self._interval = interval_ms / 1000
+        self._dir_mtimes: dict[str, float] = {}
+        self._running = False
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=5)
+            self._thread = None
+
+    def _poll_loop(self) -> None:
+        while self._running:
+            try:
+                self._check_all_roots()
+            except Exception:
+                pass
+            time.sleep(self._interval)
+
+    def _check_all_roots(self) -> None:
+        any_change = False
+        for root in self._roots:
+            if not os.path.isdir(root):
+                continue
+            for dirpath, _, _ in os.walk(root):
+                try:
+                    current_mtime = os.path.getmtime(dirpath)
+                except OSError:
+                    continue
+                prev = self._dir_mtimes.get(dirpath)
+                if prev is not None and prev != current_mtime:
+                    any_change = True
+                self._dir_mtimes[dirpath] = current_mtime
+
+        if any_change:
+            try:
+                self._callback()
+            except Exception:
+                pass
 
 
 # ── Markdown ingestion handle ───────────────────────────────────────────────
@@ -384,6 +759,7 @@ class MarkdownIngestionHandle:
                     rpc_caller=rpc_caller,
                     user_id=user_id,
                     obsidian_mode=False,
+                    poll_interval_ms=config.get("markdownIngestionPollIntervalMs", DEFAULT_POLL_INTERVAL_MS),
                     logger_override=self._log,
                 )
             )
@@ -409,6 +785,7 @@ class MarkdownIngestionHandle:
                     rpc_caller=rpc_caller,
                     user_id=user_id,
                     obsidian_mode=True,
+                    poll_interval_ms=config.get("markdownIngestionPollIntervalMs", DEFAULT_POLL_INTERVAL_MS),
                     logger_override=self._log,
                 )
             )
@@ -442,7 +819,10 @@ class MarkdownIngestionHandle:
                     "roots": a.roots,
                     "snapshotPath": a.snapshot_path,
                     "fileCount": len(a._snapshot._files),
-                    "running": a._started and not a._stopping,
+                    "running": a._is_started and not a._is_stopping,
+                    "lastAcceptMore": a.last_accept_more,
+                    "lastQueueDepth": a.last_queue_depth,
+                    "lastQueueCapacity": a.last_queue_capacity,
                 }
                 for a in self._adapters
             ],
@@ -471,13 +851,33 @@ class MarkdownIngestionHandle:
         return str(Path(hermes_home) / f"libravdb-markdown-ingest-{kind}.json")
 
 
+# ── Root scan state ──────────────────────────────────────────────────────────
+
+
+class _RootScanState:
+    __slots__ = (
+        "root", "scanning", "dirty", "timer", "resume_from_path",
+        "known_files", "directory_watchers",
+    )
+
+    def __init__(self, root: str, known_files: set[str]):
+        self.root = root
+        self.scanning = False
+        self.dirty = False
+        self.timer: threading.Timer | None = None
+        self.resume_from_path: str | None = None
+        self.known_files = known_files
+
+
 # ── Directory source adapter ────────────────────────────────────────────────
 
 
 class DirectorySourceAdapter:
     """Scans a set of directory roots for markdown files and ingests them via gRPC.
 
-    Port of the TypeScript ``DirectoryMarkdownSourceAdapter``.
+    Port of the TypeScript ``DirectoryMarkdownSourceAdapter`` with full parity:
+    debounce scheduling, back-pressure resume, polling-based file watching,
+    streamed reads with incremental FNV-1a, and chunked REPLACE/APPEND ingest.
     """
 
     def __init__(
@@ -493,6 +893,7 @@ class DirectorySourceAdapter:
         rpc_caller: Callable[[str, Any], Any],
         user_id: str,
         obsidian_mode: bool = False,
+        poll_interval_ms: int = DEFAULT_POLL_INTERVAL_MS,
         logger_override=None,
     ):
         self.kind = kind
@@ -509,70 +910,148 @@ class DirectorySourceAdapter:
         self._log = logger_override or logger
 
         self._snapshot = SnapshotStore(snapshot_path)
-        self._started = False
-        self._stopping = False
-        self._scan_lock = threading.Lock()
+        self._root_states: dict[str, _RootScanState] = {}
         self._active_scans: set[threading.Thread] = set()
-        self._known_files: dict[str, set[str]] = {}  # root → set of sourceDoc paths
+        self._is_started = False
+        self._is_stopping = False
+        self._scan_lock = threading.Lock()
+
+        # Ingest queue (lazy-init on first use)
+        self._ingest_queue: MarkdownIngestQueue | None = None
+
+        # Polling watcher for continuous monitoring
+        self._watcher: _PollingWatcher | None = None
+        self._poll_interval_ms = poll_interval_ms
+
+        # Back-pressure / feedback state
+        self.last_accept_more = True
+        self.last_retry_after_ms = 0
+        self.last_queue_depth = 0
+        self.last_queue_capacity = 0
+        self.last_processing_time_us = 0
+        self.last_nodes_accepted = 0
+        self.last_nodes_rejected = 0
+        self.last_tokens_ingested = 0
+        self.last_token_burst_limit = 512
+        self.last_wal_depth = 0
+        self.last_wal_capacity = 0
 
     # ── lifecycle ────────────────────────────────────────────────────────
 
     def start(self) -> None:
-        if self._started:
+        if self._is_started:
             return
         self._snapshot.load()
-        self._started = True
-        self._stopping = False
+        self._is_started = True
+        self._is_stopping = False
+
+        # Initialize root states from snapshot
+        for root in self.roots:
+            resolved = str(Path(root).resolve())
+            self._root_states[resolved] = _RootScanState(
+                root=resolved,
+                known_files=self._snapshot.files_for_root(resolved),
+            )
+
+        # Start polling watcher
+        resolved_roots = [str(Path(r).resolve()) for r in self.roots]
+        self._watcher = _PollingWatcher(
+            roots=resolved_roots,
+            callback=self._on_watcher_change,
+            interval_ms=self._poll_interval_ms,
+        )
+        self._watcher.start()
+
         self.refresh()
 
     def refresh(self) -> None:
-        if not self._started or self._stopping:
+        if not self._is_started or self._is_stopping:
             return
         for root in self.roots:
-            self._scan_root(root)
+            self._scan_root(str(Path(root).resolve()))
 
     def stop(self) -> None:
-        self._stopping = True
+        self._is_stopping = True
+
+        # Stop watcher
+        if self._watcher:
+            self._watcher.stop()
+            self._watcher = None
+
+        # Cancel pending timers
+        for state in self._root_states.values():
+            if state.timer:
+                state.timer.cancel()
+                state.timer = None
+
         # Wait for active scans
         active = list(self._active_scans)
         for t in active:
             t.join(timeout=30)
+
         self._snapshot.save_if_dirty()
-        self._started = False
+        self._root_states.clear()
+        self._is_started = False
+
+    # ── watcher callback ──────────────────────────────────────────────────
+
+    def _on_watcher_change(self) -> None:
+        """Called by the polling watcher when directory changes are detected."""
+        if self._is_stopping:
+            return
+        for state in self._root_states.values():
+            state.resume_from_path = None
+            self._schedule_root_scan(state)
 
     # ── scanning ─────────────────────────────────────────────────────────
 
+    def _get_root_state(self, root: str) -> _RootScanState:
+        resolved = str(Path(root).resolve())
+        existing = self._root_states.get(resolved)
+        if existing:
+            return existing
+        state = _RootScanState(
+            root=resolved,
+            known_files=self._snapshot.files_for_root(resolved),
+        )
+        self._root_states[resolved] = state
+        return state
+
     def _scan_root(self, root: str) -> None:
-        if not self._started or self._stopping:
+        if not self._is_started or self._is_stopping:
             return
 
-        resolved = str(Path(root).resolve())
-        with self._scan_lock:
-            # Single scan per root at a time — if already scanning, mark dirty
-            pass  # We use a simpler fire-and-forget model
+        state = self._get_root_state(root)
+        if state.scanning:
+            state.dirty = True
+            return
 
-        t = threading.Thread(target=self._scan_root_impl, args=(resolved,), daemon=True)
+        state.scanning = True
+        self.last_accept_more = True
+        self.last_retry_after_ms = 0
+
+        t = threading.Thread(target=self._scan_root_impl, args=(state,), daemon=True)
         self._active_scans.add(t)
         t.start()
 
-    def _scan_root_impl(self, root: str) -> None:
+    def _scan_root_impl(self, state: _RootScanState) -> None:
         stats = ScanStats()
         started_at = time.monotonic()
         try:
             current_files: set[str] = set()
             candidates: list[dict] = []
-            self._walk_directory(root, root, current_files, stats, candidates)
-            self._sync_candidates(root, candidates, stats)
-            if not self._stopping:
-                self._prune_deleted(root, current_files, stats)
-                self._known_files[root] = current_files
+            self._walk_directory(state.root, state.root, current_files, stats, candidates)
+            self._sync_candidates(state, candidates, stats)
+            if not self._is_stopping:
+                self._prune_deleted(state.root, current_files, stats)
+                state.known_files = current_files
                 self._snapshot.save_if_dirty()
             elapsed = (time.monotonic() - started_at) * 1000
             self._log.info(
                 "[markdown-ingest] %s scan complete root=%s dirs=%d pruned=%d "
                 "markdown=%d included=%d skipped=%d unchanged=%d ingested=%d "
                 "deleted=%d deferred=%d errors=%d durationMs=%d",
-                self.kind, root,
+                self.kind, state.root,
                 stats.directories_scanned, stats.directories_pruned,
                 stats.markdown_files_seen, stats.files_included,
                 stats.files_skipped, stats.files_unchanged,
@@ -581,9 +1060,37 @@ class DirectorySourceAdapter:
                 int(elapsed),
             )
         except Exception as exc:
-            self._log.warning("[markdown-ingest] scan failed for root=%s: %s", root, exc)
+            self._log.warning("[markdown-ingest] scan failed for root=%s: %s", state.root, exc)
         finally:
+            state.scanning = False
             self._active_scans.discard(threading.current_thread())
+            if state.dirty:
+                state.dirty = False
+                if not self._is_stopping:
+                    self._schedule_root_scan(state)
+
+    def _schedule_root_scan(self, state: _RootScanState, delay_ms: int | None = None) -> None:
+        """Schedule a debounced rescan of a root."""
+        if not self._is_started or self._is_stopping:
+            return
+        if state.scanning:
+            state.dirty = True
+            return
+        if state.timer:
+            return  # Already scheduled
+
+        effective_delay = max(self.debounce_ms, delay_ms or 0) / 1000
+        state.timer = threading.Timer(
+            effective_delay,
+            self._on_debounce_timer,
+            args=(state,),
+        )
+        state.timer.daemon = True
+        state.timer.start()
+
+    def _on_debounce_timer(self, state: _RootScanState) -> None:
+        state.timer = None
+        self._scan_root(state.root)
 
     def _walk_directory(
         self,
@@ -605,7 +1112,7 @@ class DirectorySourceAdapter:
             return
 
         for entry in entries:
-            if self._stopping:
+            if self._is_stopping:
                 return
             if entry.is_dir():
                 self._walk_directory(root, str(entry), current_files, stats, candidates)
@@ -638,18 +1145,50 @@ class DirectorySourceAdapter:
 
     # ── candidate sync ────────────────────────────────────────────────────
 
-    def _sync_candidates(self, root: str, candidates: list[dict], stats: ScanStats) -> None:
+    def _sync_candidates(self, state: _RootScanState, candidates: list[dict], stats: ScanStats) -> None:
         sorted_candidates = self._sort_candidates(candidates)
+
+        # Resume from back-pressure checkpoint
+        skipping = False
+        if state.resume_from_path:
+            target_exists = any(c["path"] == state.resume_from_path for c in sorted_candidates)
+            if target_exists:
+                skipping = True
+                self.last_accept_more = True
+                self.last_retry_after_ms = 0
+            else:
+                state.resume_from_path = None
+
         for candidate in sorted_candidates:
-            if self._stopping:
+            if skipping:
+                if candidate["path"] == state.resume_from_path:
+                    skipping = False
+                else:
+                    continue
+
+            if self._is_stopping:
                 return
+
+            # Back-pressure gate: daemon says stop accepting
+            if not self.last_accept_more:
+                state.resume_from_path = candidate["path"]
+                self._schedule_root_scan(state, self.last_retry_after_ms)
+                return
+
+            # WAL capacity check
+            if self.last_wal_capacity > 0 and self.last_wal_depth > self.last_wal_capacity * 0.8:
+                state.resume_from_path = candidate["path"]
+                self._schedule_root_scan(state, 2000)
+                return
+
             estimated_tokens = max(1, candidate["size"] // APPROX_CHARS_PER_TOKEN)
             if estimated_tokens > self.max_tokens_per_file:
                 stats.files_deferred += 1
                 continue
+
             try:
                 result = self._sync_markdown_file(
-                    root, candidate["path"],
+                    state.root, candidate["path"],
                     size=candidate["size"],
                     mtime_ms=candidate["mtime_ms"],
                     ctime_ms=candidate["ctime_ms"],
@@ -666,6 +1205,8 @@ class DirectorySourceAdapter:
                 stats.sync_errors += 1
                 self._log.warning("[markdown-ingest] sync failed for %s: %s", candidate["path"], exc)
 
+        state.resume_from_path = None
+
     def _sync_markdown_file(
         self,
         root: str,
@@ -674,33 +1215,31 @@ class DirectorySourceAdapter:
         mtime_ms: int,
         ctime_ms: int,
     ) -> str:
-        """Sync a single markdown file. Returns 'ingested', 'unchanged', 'deleted', or 'skipped'."""
+        """Sync a single markdown file using streamed reads and chunked ingest queue.
+
+        Returns 'ingested', 'unchanged', 'deleted', or 'skipped'.
+        """
         relative_path = str(Path(file_path).relative_to(root)).replace(os.sep, "/")
         source_doc = file_path
 
-        # Check snapshot for unchanged files
+        # Check snapshot for unchanged files (size + mtime match)
         cached = self._snapshot.get(source_doc)
         if cached and cached.get("size") == size and cached.get("mtimeMs") == mtime_ms:
             return "unchanged"
 
-        # Read file (with size cap)
+        # Streamed read with incremental FNV hash
         max_bytes = self.max_tokens_per_file * 4 + 3
-        try:
-            file_stat = Path(file_path).stat()
-        except OSError:
-            self._snapshot.delete(source_doc)
-            return "deleted"
+        streamed = _stream_read_file_with_hash(file_path, max_bytes)
 
-        if file_stat.st_size > max_bytes:
+        if streamed == "too_large":
             return "skipped"
 
-        try:
-            text = Path(file_path).read_text()
-        except Exception:
+        if streamed is None:
             self._snapshot.delete(source_doc)
             return "deleted"
 
-        file_hash = hash_text(text)
+        text = streamed["text"]
+        file_hash = streamed["fileHash"]
 
         # Hash-only change (mtime different but content same)
         if cached and cached.get("fileHash") == file_hash:
@@ -720,17 +1259,22 @@ class DirectorySourceAdapter:
                 self._snapshot.delete(source_doc)
                 return "deleted" if cached else "skipped"
 
-        # Ingest via gRPC
-        self._ingest_markdown_document(
+        # Ingest via chunked REPLACE/APPEND queue
+        queue = self._get_ingest_queue()
+        feedback = queue.enqueue_ingest(
             source_doc=source_doc,
             text=text,
             source_root=root,
             source_path=relative_path,
+            source_kind=self.kind,
             file_hash=file_hash,
             source_size=size,
             source_mtime_ms=mtime_ms,
             source_ctime_ms=ctime_ms,
+            on_chunk_feedback=self._apply_ingest_feedback,
         )
+        if feedback:
+            self._apply_ingest_feedback(feedback)
 
         self._snapshot.set(source_doc, {
             "root": root,
@@ -742,50 +1286,57 @@ class DirectorySourceAdapter:
         })
         return "ingested"
 
-    # ── gRPC ingest ──────────────────────────────────────────────────────
+    def _apply_ingest_feedback(self, feedback: dict | None) -> None:
+        """Update back-pressure state from ingest queue feedback."""
+        if feedback and isinstance(feedback.get("acceptMore"), bool):
+            self.last_accept_more = feedback["acceptMore"]
+            self.last_queue_depth = feedback.get("queueDepth", 0)
+            self.last_queue_capacity = feedback.get("queueCapacity", 0)
+            self.last_processing_time_us = feedback.get("processingTimeUs", 0)
+            self.last_nodes_accepted = feedback.get("nodesAccepted", 0)
+            self.last_nodes_rejected = feedback.get("nodesRejected", 0)
+            self.last_tokens_ingested = feedback.get("tokensIngested", 0)
+            if feedback.get("tokenBurstLimit", 0) > 0:
+                self.last_token_burst_limit = feedback["tokenBurstLimit"]
+            self.last_wal_depth = feedback.get("walDepth", 0)
+            self.last_wal_capacity = feedback.get("walCapacity", 0)
+            if self.last_accept_more:
+                self.last_retry_after_ms = 0
+            else:
+                self.last_retry_after_ms = feedback.get("retryAfterMs") or 1000
+        else:
+            self.last_accept_more = True
+            self.last_retry_after_ms = 0
+            self.last_queue_depth = 0
+            self.last_queue_capacity = 0
+            self.last_processing_time_us = 0
+            self.last_nodes_accepted = 0
+            self.last_nodes_rejected = 0
+            self.last_tokens_ingested = 0
 
-    def _ingest_markdown_document(
-        self,
-        source_doc: str,
-        text: str,
-        source_root: str,
-        source_path: str,
-        file_hash: str,
-        source_size: int,
-        source_mtime_ms: int,
-        source_ctime_ms: int,
-    ) -> None:
-        req = pb.IngestMarkdownDocumentRequest(
-            source_doc=source_doc,
-            text=text,
-            tokenizer_id=DEFAULT_TOKENIZER_ID,
-            core_doc=True,
-            user_id=self._user_id,
-            source_meta=pb.MarkdownSourceMeta(
-                source_root=source_root,
-                source_path=source_path,
-                source_kind=self.kind,
-                file_hash=file_hash,
-                source_size=source_size,
-                source_mtime_ms=source_mtime_ms,
-                source_ctime_ms=source_ctime_ms,
-                ingest_version=MARKDOWN_INGEST_VERSION,
-                hash_backend=HASH_BACKEND,
-            ),
-        )
-        self._rpc_caller("IngestMarkdownDocument", req)
+    def _get_ingest_queue(self) -> MarkdownIngestQueue:
+        if self._ingest_queue is None:
+            self._ingest_queue = MarkdownIngestQueue(
+                rpc_caller=self._rpc_caller,
+                user_id=self._user_id,
+                logger_override=self._log,
+            )
+        return self._ingest_queue
+
+    # ── delete handling ──────────────────────────────────────────────────
 
     def _delete_source_document(self, source_doc: str) -> None:
         try:
-            req = pb.DeleteAuthoredDocumentRequest(source_doc=source_doc)
-            self._rpc_caller("DeleteAuthoredDocument", req)
+            queue = self._get_ingest_queue()
+            queue.enqueue_delete(source_doc)
         except Exception as exc:
             self._log.debug("[markdown-ingest] delete failed for %s: %s", source_doc, exc)
 
     # ── pruning ──────────────────────────────────────────────────────────
 
     def _prune_deleted(self, root: str, current_files: set[str], stats: ScanStats) -> None:
-        previous = self._known_files.get(root, self._snapshot.files_for_root(root))
+        state = self._root_states.get(root)
+        previous = state.known_files if state else self._snapshot.files_for_root(root)
         removed = [f for f in previous if f not in current_files]
         if not removed:
             return

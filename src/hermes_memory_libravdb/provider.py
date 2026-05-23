@@ -41,13 +41,25 @@ def _get_hermes_home() -> Path:
     return Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")))
 
 
+_SOCKET_CANDIDATE_DIRS = [
+    os.path.expanduser("~/.libravdbd/run"),
+    "/opt/homebrew/var/libravdbd/run",
+    "/usr/local/var/libravdbd/run",
+]
+
+
 def _resolve_endpoint(endpoint: str | None = None) -> str:
     if endpoint and endpoint != "auto":
         return endpoint
-    return os.environ.get(
-        "LIBRAVDB_GRPC_ENDPOINT",
-        f"unix:{os.path.expanduser('~/.libravdbd/run/libravdb.sock')}",
-    )
+    env_endpoint = os.environ.get("LIBRAVDB_GRPC_ENDPOINT")
+    if env_endpoint:
+        return env_endpoint
+    # Probe candidate socket directories (matching TS resolveClientEndpoint)
+    for candidate_dir in _SOCKET_CANDIDATE_DIRS:
+        sock_path = os.path.join(candidate_dir, "libravdb.sock")
+        if os.path.exists(sock_path):
+            return f"unix:{sock_path}"
+    return f"unix:{os.path.expanduser('~/.libravdbd/run/libravdb.sock')}"
 
 
 def _load_secret() -> str | None:
@@ -491,6 +503,10 @@ class LibraVDBMemoryProvider:
         self._ollama_url = cfg.get("ollamaUrl")
         self._compact_model = cfg.get("compactModel")
         self._log_level = cfg.get("logLevel")
+        self._dream_promotion_enabled = cfg.get("dreamPromotionEnabled", False)
+        self._dream_promotion_diary_path = cfg.get("dreamPromotionDiaryPath")
+        self._dream_promotion_user_id = cfg.get("dreamPromotionUserId")
+        self._dream_promotion_debounce_ms = cfg.get("dreamPromotionDebounceMs", 150)
 
         try:
             transport = _resolve_transport_config(cfg)
@@ -763,9 +779,8 @@ class LibraVDBMemoryProvider:
             lines.append(f"- [score {r.score:.2f}] {snippet}")
         return "\n".join(lines)
 
-
-def register(ctx) -> None:
-    ctx.register_memory_provider(LibraVDBMemoryProvider())
+# The authoritative register() lives in __init__.py which handles the full
+# registration surface: memory provider, lifecycle hooks, and context engine.
 
 
 # ── Ingest Queue ──────────────────────────────────────────────────────────────
