@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from .scopes import validate_collection_name
+
 logger = logging.getLogger(__name__)
 
 IdentitySource = Literal["config", "file", "auto", "session-key", "default"]
@@ -34,7 +36,20 @@ def _derive_parts() -> dict[str, str]:
 
 
 def _derive_auto_id(parts: dict[str, str]) -> str:
-    return f"{parts['username']}@{parts['host']}#{parts['home_hash']}"
+    username = _sanitize_identity_part(parts["username"], fallback="user")
+    host = _sanitize_identity_part(parts["host"], fallback="host")
+    candidate = f"{username}@{host}#{parts['home_hash']}"
+    if not candidate[0].isalpha():
+        candidate = f"u-{candidate}"
+    return validate_collection_name(candidate[:128])
+
+
+def _sanitize_identity_part(value: str, *, fallback: str) -> str:
+    sanitized = "".join(
+        ch if ch.isalnum() or ch in "_.:@#-" else "-"
+        for ch in str(value or "").strip()
+    ).strip(".:@#-")
+    return sanitized or fallback
 
 
 def _write_identity_file(path: Path, user_id: str, parts: dict[str, str]) -> None:
@@ -91,7 +106,7 @@ def resolve_identity(
     # 1. Plugin config override
     config_user_id = str(config.get("userId", "")).strip()
     if config_user_id:
-        return ResolvedIdentity(user_id=config_user_id, source="config")
+        return ResolvedIdentity(user_id=validate_collection_name(config_user_id), source="config")
 
     # Resolve identity file path
     identity_path = config.get("identityPath")
@@ -107,11 +122,12 @@ def resolve_identity(
         try:
             raw = file_path.read_text()
             parsed = json.loads(raw)
-            uid = str(parsed.get("userId", "")).strip()
-            if uid:
-                return ResolvedIdentity(user_id=uid, source="file")
         except Exception:
             pass
+        else:
+            uid = str(parsed.get("userId", "")).strip()
+            if uid:
+                return ResolvedIdentity(user_id=validate_collection_name(uid), source="file")
 
     # 3. Auto-derive
     try:
