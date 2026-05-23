@@ -43,6 +43,24 @@ After setup, verify the plugin is working:
 hermes libravdb status
 ```
 
+### Troubleshooting: libravdb doesn't appear in hermes memory setup
+
+1. **Restart Hermes** — Hermes discovers pip-installed plugins at startup. After `pip install`, restart Hermes completely.
+
+2. **Verify the package installed**:
+   ```bash
+   pip show hermes-memory-libravdb
+   ```
+
+3. **Manual registration fallback** — create the plugin directory if automatic discovery doesn't work:
+   ```bash
+   mkdir -p ~/.hermes/plugins/memory/libravdb
+   cp -r $(pip show -f hermes-memory-libravdb | grep Location | cut -d' ' -f2)/hermes_memory_libravdb/* ~/.hermes/plugins/memory/libravdb/
+   ```
+   Then restart Hermes.
+
+4. **Check Hermes version** — this plugin requires Hermes Agent 0.9 or later. Run `hermes --version`.
+
 You should see output with `ok: true` and memory counts. If you see an error instead, check that `libravdbd` is running and that `LIBRAVDB_GRPC_ENDPOINT` is set correctly (see [Configuration](./configuration.md)).
 
 ---
