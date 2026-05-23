@@ -39,12 +39,11 @@ A stable identity for cross-session durable memory. When set, memories are store
 | **Env variable** | — (no env var for this field) |
 | **Default** | `""` (auto-derived from OS user + hostname) |
 
-```bash
-# config.yaml
-memory:
-  plugins:
-    libravdb:
-      userId: "my-user-id"
+```json
+// ~/.hermes/libravdb.json
+{
+  "userId": "my-user-id"
+}
 ```
 
 ---
@@ -59,12 +58,11 @@ Default number of recalled memory hits returned by search and prefetch operation
 | **Env variable** | — |
 | **Default** | `8` |
 
-```bash
-# config.yaml
-memory:
-  plugins:
-    libravdb:
-      topK: 12
+```json
+// ~/.hermes/libravdb.json
+{
+  "topK": 12
+}
 ```
 
 ---
@@ -79,12 +77,11 @@ Minimum semantic score threshold for prefetched and tool search results. Results
 | **Env variable** | — |
 | **Default** | `0.35` |
 
-```bash
-# config.yaml
-memory:
-  plugins:
-    libravdb:
-      minScore: 0.4
+```json
+// ~/.hermes/libravdb.json
+{
+  "minScore": 0.4
+}
 ```
 
 ---
@@ -158,16 +155,12 @@ The plugin will use all defaults: `auto` endpoint discovery, auto-derived userId
 # ~/.hermes/config.yaml
 memory:
   provider: "libravdb"
-  plugins:
-    libravdb:
-      endpoint: "auto"      # or "unix:/path/to/socket" or "tcp:host:port"
-      userId: ""            # leave empty for auto-derive, or set a stable id
-      topK: 8               # number of memory hits to recall
-      minScore: 0.35        # minimum semantic score threshold
 ```
 
-```bash
-# ~/.hermes/libravdb.json (written by the plugin, not edited manually)
+The provider selection is the only thing that lives in Hermes config.yaml. All other settings go in the provider's own config file:
+
+```json
+// ~/.hermes/libravdb.json
 {
   "endpoint": "auto",
   "userId": "",
@@ -175,6 +168,8 @@ memory:
   "minScore": 0.35
 }
 ```
+
+This file is written by `hermes memory setup` or can be edited directly. See the [full config reference](#config-fields) for the 60+ available tuning parameters.
 
 With environment overrides:
 

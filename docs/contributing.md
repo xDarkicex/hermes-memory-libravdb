@@ -24,15 +24,18 @@ hermes libravdb status
 ## Project Layout
 
 ```
-src/libravdb/
-├── __init__.py    # Package exports. register() is the Hermes entry point.
-├── provider.py    # LibraVDBMemoryProvider class and _GrpcChannel.
-│                   # All gRPC logic, nonce auth, MemoryProvider implementation.
-└── cli.py          # hermes libravdb CLI commands (status, health, search).
+src/hermes_memory_libravdb/
+├── __init__.py          # register(ctx) entry point, lifecycle hooks,
+│                         # context engine (_LibraVDBContextEngine)
+├── provider.py          # LibraVDBMemoryProvider, _GrpcChannel, IngestQueue
+├── cli.py               # hermes libravdb <subcommand> CLI
+├── scopes.py            # Collection naming, search scopes, durable namespace
+├── identity.py          # OS/hostname identity resolution
+└── markdown_ingest.py   # Directory scanning, chunked REPLACE/APPEND ingest
 
-docs/               # User-facing documentation.
-plugin.yaml         # Hermes plugin manifest (name, version, hooks).
-pyproject.toml      # Package config, entry points, dependencies.
+docs/                    # User-facing documentation
+plugin.yaml              # Hermes plugin manifest (name, version, hooks)
+pyproject.toml           # Package config, entry points, dependencies
 ```
 
 ---

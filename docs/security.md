@@ -10,14 +10,15 @@ The plugin stores configuration in:
 $HERMES_HOME/libravdb.json
 ```
 
-This file is written by `save_config(values, hermes_home)` and contains only non-secret settings:
+This file is written by `save_config(values, hermes_home)` during `hermes memory setup` and loaded at plugin startup. It contains non-secret settings only:
 
-- `endpoint` — gRPC endpoint string
-- `userId` — durable memory namespace
-- `topK` — recall hit count
-- `minScore` — semantic score threshold
+- Connection preferences (`endpoint`)
+- Identity (`userId`)
+- Search tuning (`topK`, `minScore`, `crossSessionRecall`, etc.)
+- Compaction and budget parameters
+- Optional markdown ingestion configuration
 
-**No secrets are written to this file.** The HMAC auth secret is never stored in the config — it is read exclusively from environment variables at runtime.
+**No secrets are written to this file.** The HMAC auth secret is never stored in the config — it is read exclusively from environment variables at runtime. The full set of 60+ available keys is documented in [Configuration](./configuration.md).
 
 ### Daemon Data — `$HERMES_HOME/.libravdbd/`
 

@@ -102,14 +102,18 @@ Before exposing Hermes over remote channels, read [Security](./docs/security.md)
 ## Operator Quick Refs
 
 ```bash
-hermes libravdb status      # Show daemon status
-hermes libravdb health     # Check daemon health
-hermes libravdb search "query"  # Search memory
+hermes libravdb status              # daemon health, collection counts
+hermes libravdb health              # quick liveness check
+hermes libravdb search "query"      # semantic memory search
+hermes libravdb flush --user-id X   # wipe user namespace
+hermes libravdb export --user-id X  # NDJSON memory export
+hermes libravdb journal --session-id X  # lifecycle journal
+hermes libravdb index --user-id X --force  # rebuild search index
 ```
 
 ## Configuration
 
-All keys are optional. For the full reference, see [Configuration](./docs/configuration.md).
+Provider config lives in `$HERMES_HOME/libravdb.json`. All keys are optional. For the full 60+ key reference, see [Configuration](./docs/configuration.md).
 
 | Key | Type | Default | |
 |---|---|---|---|
@@ -117,6 +121,8 @@ All keys are optional. For the full reference, see [Configuration](./docs/config
 | `userId` | string | auto-derived | Stable identity for cross-session durable memory |
 | `topK` | number | `8` | Default number of recalled memory hits |
 | `minScore` | number | `0.35` | Minimum semantic score for prefetched/tool search results |
+
+Set `memory.provider: "libravdb"` in Hermes `config.yaml` to activate. Run `hermes memory setup` for guided configuration.
 
 ## Environment Variables
 
@@ -131,6 +137,7 @@ All keys are optional. For the full reference, see [Configuration](./docs/config
 
 - New install: [Install](./docs/install.md)
 - Understand the design: [Architecture](./docs/architecture.md)
+- How it fits Hermes: [Hermes Integration](./docs/hermes-integration.md)
 - Configure: [Configuration](./docs/configuration.md), [TLS configuration](./docs/TLS_configuration.md)
 - Operate safely: [Security](./docs/security.md), [Uninstall](./docs/uninstall.md)
 - Contributing: [Contributing](./docs/contributing.md)

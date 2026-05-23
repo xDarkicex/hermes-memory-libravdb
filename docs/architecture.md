@@ -2,43 +2,75 @@
 
 ## Overview
 
-The libravdb memory provider is a Python plugin that connects Hermes Agent to the `libravdbd` daemon via native gRPC. It handles persistent memory storage, semantic recall, and cross-session context for the agent.
+The libravdb memory provider is a Hermes Agent plugin that connects to the `libravdbd` daemon via native gRPC. It implements both the MemoryProvider and ContextEngine interfaces, delivering dynamic per-turn memory retrieval, predictive context injection, and cross-session recall alongside Hermes' built-in MEMORY.md/USER.md.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Hermes Agent                            │
-│                                                                 │
-│   MemoryManager ──► LibraVDBMemoryProvider                      │
-│                       │                                         │
-│                       ├── initialize(session_id, hermes_home)   │
-│                       ├── get_tool_schemas() → [libravdb_search,│
-│                       │                              libravdb_status]
-│                       ├── prefetch(query) → recall context      │
-│                       ├── sync_turn(user, assistant) → ingest   │
-│                       ├── handle_tool_call(name, args)         │
-│                       ├── on_session_end(messages)              │
-│                       ├── on_session_switch(new_session_id)     │
-│                       └── shutdown()                             │
-│                                                                 │
-│   CLI ──► hermes libravdb <status|health|search>               │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Hermes Agent                                 │
+│                                                                      │
+│   MemoryManager ──► LibraVDBMemoryProvider                           │
+│                       │                                              │
+│                       ├── initialize(session_id, hermes_home)        │
+│                       ├── system_prompt_block() → static provider    │
+│                       │      info injected once per session          │
+│                       ├── prefetch(query) → per-turn semantic search │
+│                       ├── queue_prefetch(query) → background warm    │
+│                       ├── sync_turn(user, assistant) → async ingest  │
+│                       ├── on_memory_write(action, target, content)   │
+│                       │      → mirror curated memory to daemon       │
+│                       ├── on_delegation(task, result)                │
+│                       │      → persist subagent findings             │
+│                       ├── on_pre_compress(messages)                  │
+│                       │      → save context before compression       │
+│                       ├── on_session_end(messages) → lifecycle hint  │
+│                       ├── get_tool_schemas() → [libravdb_search,     │
+│                       │      libravdb_status]                        │
+│                       ├── handle_tool_call(name, args)               │
+│                       └── shutdown()                                 │
+│                                                                      │
+│   ContextEngine ──► _LibraVDBContextEngine                           │
+│                       │                                              │
+│                       ├── bootstrap() → BootstrapSessionKernel       │
+│                       ├── assemble(context) → daemon context         │
+│                       │      + exact recall + predictive cache       │
+│                       ├── afterTurn(turn) → cache predictions        │
+│                       ├── compress(messages) → CompactSession RPC    │
+│                       ├── should_compress(tokens) → threshold check  │
+│                       └── update_from_response(usage) → track tokens │
+│                                                                      │
+│   Hooks ──► on_session_start / on_session_end /                      │
+│             on_session_finalize / on_session_reset                   │
+│                                                                      │
+│   CLI ──► hermes libravdb <status|health|search|flush|               │
+│             export|journal|index|dream-promote|markdown-ingest>      │
+└─────────────────────────────────────────────────────────────────────┘
                               │
-                              │ gRPC (Unix socket or TCP)
+                              │ gRPC (Unix socket or TCP/TLS)
                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                        libravdbd daemon                         │
-│                                                                 │
-│   ┌─────────────┐  ┌─────────────┐  ┌──────────────────────┐   │
-│   │  Health RPC │  │ SearchText  │  │ IngestMessageKernel  │   │
-│   │  (nonce     │  │ (semantic   │  │  (turn ingestion,    │   │
-│   │   bootstrap)│  │  recall)    │  │   session lifecycle) │   │
-│   └─────────────┘  └─────────────┘  └──────────────────────┘   │
-│                                                                 │
-│   ┌─────────────────────────────────────────────────────────┐  │
-│   │                    Vector Store                         │  │
-│   │   session:<id>  │  user:<id>  │  global                 │  │
-│   └─────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                        libravdbd daemon                              │
+│                                                                      │
+│   ┌────────────────┐  ┌──────────────────┐  ┌───────────────────┐  │
+│   │ Health         │  │ SearchText       │  │ IngestMessage-    │  │
+│   │ (nonce         │  │ SearchText-      │  │ Kernel            │  │
+│   │  bootstrap)    │  │ Collections      │  │                   │  │
+│   └────────────────┘  └──────────────────┘  └───────────────────┘  │
+│                                                                      │
+│   ┌────────────────┐  ┌──────────────────┐  ┌───────────────────┐  │
+│   │ Assemble-      │  │ AfterTurn-       │  │ CompactSession    │  │
+│   │ ContextInternal│  │ Kernel           │  │                   │  │
+│   └────────────────┘  └──────────────────┘  └───────────────────┘  │
+│                                                                      │
+│   ┌────────────────┐  ┌──────────────────┐  ┌───────────────────┐  │
+│   │ Bootstrap-     │  │ SessionLifecycle │  │ MarkdownIngest    │  │
+│   │ SessionKernel  │  │ Hint             │  │                   │  │
+│   └────────────────┘  └──────────────────┘  └───────────────────┘  │
+│                                                                      │
+│   ┌──────────────────────────────────────────────────────────────┐  │
+│   │                    Vector Store                               │  │
+│   │   session:<id>  │  user:<id>  │  global                       │  │
+│   └──────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -53,18 +85,30 @@ Hermes discovers memory provider plugins via the directory convention:
 └── plugin.yaml    # name, version, hooks declaration
 ```
 
-When the plugin is installed via pip, the `hermes_agent.plugins` entry point in `pyproject.toml` registers `libravdb:register`. Hermes calls `register(ctx)` once during startup, which calls `ctx.register_memory_provider(LibraVDBMemoryProvider())`.
+When installed via pip, the `hermes_agent.plugins` entry point in `pyproject.toml` registers the plugin:
 
-For manual installation, copy the plugin directory to `~/.hermes/plugins/memory/libravdb/` and set `memory.provider: "libravdb"` in `~/.hermes/config.yaml`.
+```toml
+[project.entry-points."hermes_agent.plugins"]
+libravdb-memory = "hermes_memory_libravdb:register"
+```
+
+Hermes calls `register(ctx)` once during startup. Our single authoritative registration path in `__init__.py` wires everything:
 
 ```
 Hermes startup
   │
-  ├── discovers plugins/memory/libravdb/__init__.py
+  ├── discovers hermes_agent.plugins entry point
   ├── calls register(ctx)
-  │     └── ctx.register_memory_provider(LibraVDBMemoryProvider())
-  └── plugin is now the active memory provider
+  │     ├── ctx.register_memory_provider(LibraVDBMemoryProvider())
+  │     ├── ctx.register_context_engine("libravdb", _build_context_engine)
+  │     ├── ctx.register_hook("on_session_start", _on_session_start)
+  │     ├── ctx.register_hook("on_session_end", _on_session_end)
+  │     ├── ctx.register_hook("on_session_finalize", _on_session_finalize)
+  │     └── ctx.register_hook("on_session_reset", _on_session_reset)
+  └── plugin is now the active memory provider + context engine
 ```
+
+The user activates it via `memory.provider: "libravdb"` in `config.yaml` and optionally `context.engine: "libravdb"`.
 
 ---
 
@@ -72,144 +116,131 @@ Hermes startup
 
 ### `initialize(session_id, **kwargs)`
 
-Called once at agent startup. Sets up the gRPC channel and session context.
+Called once at agent startup. Sets up the gRPC channel, resolves identity, loads config, and optionally starts markdown ingestion.
 
 ```python
 def initialize(self, session_id: str, **kwargs) -> None:
     self._session_id = session_id
     self._session_key = session_id
-    self._user_id = str(kwargs.get("user_id") or "").strip() or None
+    self._resolved_identity = resolve_identity(...)
     self._writes_enabled = str(kwargs.get("agent_context") or "primary") == "primary"
-    self._startup_error = None
-    self._channel = _GrpcChannel(
-        endpoint=self._endpoint,
-        secret=self._secret,
-    )
+    self._channel = _GrpcChannel(...)
+    # Optionally: start MarkdownIngestionHandle if markdownIngestionEnabled
 ```
 
 Key `kwargs`:
-- `hermes_home` — the active Hermes configuration directory path. Use this for all storage, not hardcoded paths.
+- `hermes_home` — the active Hermes configuration directory. Use for all storage paths.
 - `platform` — "cli", "telegram", "discord", "cron", etc.
-- `agent_context` — "primary", "subagent", "cron", or "flush". Writes are skipped for non-primary contexts.
+- `agent_context` — "primary", "subagent", "cron", or "flush". Writes are skipped for non-primary.
 - `agent_identity` — profile name for per-profile scoping.
 - `user_id` — platform user identifier (gateway sessions).
 
-### `get_tool_schemas()`
-
-Returns tool schemas for the two tools the plugin exposes: `libravdb_search` and `libravdb_status`. Hermes injects these into the model's tool list.
-
-```python
-def get_tool_schemas(self) -> List[Dict[str, Any]]:
-    return [
-        {
-            "name": "libravdb_search",
-            "description": "Search LibraVDB long-term memory...",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Semantic search query."},
-                    "limit": {"type": "integer"},
-                    "min_score": {"type": "number"},
-                },
-                "required": ["query"],
-            },
-        },
-        {
-            "name": "libravdb_status",
-            "description": "Check whether the LibraVDB daemon is reachable...",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    ]
-```
-
-### `handle_tool_call(tool_name, args, **kwargs)`
-
-Dispatches to the appropriate tool handler.
-
-```python
-def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
-    if tool_name == "libravdb_search":
-        # calls SearchText RPC
-    elif tool_name == "libravdb_status":
-        # calls Status RPC
-```
-
-Returns a JSON string with the result or an error.
-
 ### `system_prompt_block()`
 
-Returns static text injected into the system prompt. If the plugin failed to initialize, returns a degraded notice so Hermes still functions with built-in MEMORY.md and USER.md.
+Called once during system prompt assembly. Returns static provider info injected into the prompt. This is intentionally static per Hermes' prompt caching model — dynamic per-turn context flows through `prefetch` and the context engine.
 
----
+### `prefetch(query)` — Per-Turn Dynamic
 
-## 3. Threading Contract and Non-Blocking Sync
+Called before each API call. Runs a live semantic search against session, user, and global collections:
 
-`sync_turn()` is called after every completed turn. **It must not block** — if the gRPC call is slow, the entire Hermes event loop stalls.
-
-**Current implementation:** `sync_turn()` iterates over the user and assistant messages and calls `IngestMessageKernel` synchronously via `_channel._call()`. This blocks. The contract requires this to be non-blocking.
-
-**Required pattern** (per Hermes threading contract):
-```python
-def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-    if not self._channel or not self._writes_enabled:
-        return
-
-    def _fire_and_forget():
-        try:
-            for role, content in [("user", user_content), ("assistant", assistant_content)]:
-                req = pb.IngestMessageKernelRequest(
-                    session_id=session_id or self._session_id,
-                    session_key=self._session_key,
-                    user_id=self._user_id or "",
-                    message=pb.KernelMessage(role=role, content=content),
-                )
-                self._channel._call("IngestMessageKernel", req)
-        except Exception as exc:
-            logger.debug("LibraVDB sync_turn failed: %s", exc)
-
-    thread = threading.Thread(target=_fire_and_forget, daemon=True)
-    thread.start()
+```
+prefetch(query)
+  └── resolve_search_scopes() → [session:..., user:..., global]
+  └── SearchTextCollections(collections, text=query, k=topK)
+  └── Filter by minScore (4-level fallback chain)
+  └── Return formatted context string → injected into prompt
 ```
 
-The `_GrpcChannel._call()` method uses a threading lock (`_rpc_lock`) internally to ensure thread-safe access to the gRPC stub. All RPCs are serialized through this lock.
+### `sync_turn(user, assistant)` — Non-Blocking
 
----
-
-## 4. How Memories Are Stored and Queried
-
-### Storage (write path — `sync_turn`)
+Called after each completed turn. Uses `IngestQueue` with daemon thread for fire-and-forget ingestion:
 
 ```
 sync_turn(user_content, assistant_content)
-  └── _fire_and_forget() thread
-        └── _GrpcChannel._call("IngestMessageKernel", req)
-              └── gRPC unary call to libravdbd
-                    └── Stores in session:<sessionId> collection
+  └── IngestQueue enqueues both messages
+  └── Thread splits into chunks, retries with jitter
+  └── IngestMessageKernel RPC → daemon indexes turn
 ```
 
-Each turn is stored as a `KernelMessage` with `role` (user/assistant) and `content`. Messages are scoped to the current session.
+This is non-blocking per Hermes' threading contract. The daemon handles compaction and summarization server-side.
 
-### Query (read path — `prefetch`)
+### `queue_prefetch(query)` — Background Warming
+
+Called after each turn. Runs a background `SearchText`/`SearchTextCollections` to populate daemon-side LRU/vector caches so the next synchronous `prefetch` returns with minimal latency.
+
+### `on_memory_write(action, target, content)` — Curated Memory Mirroring
+
+Called when the agent writes to Hermes built-in MEMORY.md or USER.md. Mirrors the curated content into LibraVDB as durable memory entries. Skips non-durable targets and low-signal operations.
+
+### `on_delegation(task, result)` — Subagent Persistence
+
+Called after each `delegate_task` child completes. Emits a `SessionLifecycleHint(hook="delegation")` and ingests the task description and result summary for cross-session recall of subagent findings.
+
+### `on_pre_compress(messages)` — Pre-Discard Persistence
+
+Called before Hermes compresses context. Extracts the last few substantive messages and ingests them into the daemon to preserve context continuity across compressions. Returns a brief note for the system prompt. The actual persistence is fire-and-forget.
+
+### `on_session_end(messages)`
+
+Emits a `SessionLifecycleHint(hook="session_end")` to the daemon so it can finalize the session state.
+
+### `shutdown()`
+
+Stops markdown ingestion, flushes the ingest queue, and closes the gRPC channel.
+
+---
+
+## 3. Context Engine
+
+LibraVDB registers a context engine via `ctx.register_context_engine("libravdb", ...)`. It implements the Hermes `ContextEngine` ABC with required attributes (`last_prompt_tokens`, `last_completion_tokens`, `last_total_tokens`, `threshold_tokens`, `context_length`, `compression_count`) and all required methods.
+
+### Per-Turn Assembly Flow
 
 ```
-prefetch(query, session_id)
-  └── _GrpcChannel._call("SearchText", req)
-        ├── collection="session"  (current session only)
-        ├── text=query
-        └── k=topK (from config, default 8)
+assemble(context)
+  ├── 1. AssembleContextInternal RPC → daemon's live system_prompt_addition
+  │      (clipped to effective token budget if oversized)
+  ├── 2. Exact recall augmentation (if crossSessionRecall enabled)
+  │      ├── extract_exact_recall_tokens(prompt) → 3 regex patterns
+  │      ├── SearchTextCollections per token → user + global collections
+  │      └── format as <exact_recalled_memory> block (up to 10% of budget)
+  ├── 3. Predictive context from cached afterTurn predictions
+  │      (remaining token budget after daemon + recall)
+  └── Return combined result ≤ token_budget - headroom - current_turn_reserve
 ```
 
-The `prefetch` method searches the current session collection only. It returns formatted recall context as a string for injection into the conversation context.
-
-### Tool-based search (`handle_tool_call` → `libravdb_search`)
+### afterTurn → Predictive Context
 
 ```
-handle_tool_call("libravdb_search", args)
-  └── SearchText(collection="session", text=query, k=limit)
-        └── Returns JSON with results: [{id, score, text}, ...]
+afterTurn(turn)
+  └── AfterTurnKernel RPC with current messages
+  └── Cache predictions for next assemble() call
 ```
 
-Search currently queries only the `session` collection. Cross-session and user-level recall is available via the daemon's `searchTextCollections` RPC, which queries multiple collections at once.
+### Compaction
+
+```
+should_compress(prompt_tokens) → True if context ≥ threshold_tokens
+compress(messages, current_tokens, focus_topic)
+  └── CompactSession RPC → daemon-side compaction
+  └── Returns messages unchanged (benefit flows through next assemble)
+```
+
+---
+
+## 4. Collection Model
+
+LibraVDB uses three collection scopes matched to Hermes' memory model:
+
+| Scope | Collection | Purpose |
+|---|---|---|
+| Session | `session:<id>` | Ephemeral turn data, active conversation context |
+| User | `user:<id>` | Durable cross-session memory, curated facts |
+| Global | `global` | Shared reference knowledge |
+
+Search and prefetch query across all three when `crossSessionRecall` is enabled (default). When disabled, only the session collection is searched.
+
+Durable namespace resolution follows a priority chain: explicit `userId` → `session-key:` prefix → `agent-id:` prefix → fallback → `"default"`.
 
 ---
 
@@ -225,7 +256,7 @@ config_path = Path(hermes_home) / "libravdb.json"
 This means:
 - Each Hermes profile gets its own `libravdb.json` config
 - Config and data are isolated per profile
-- If the same `libravdbd` daemon is used across profiles, the userId in `libravdb.json` scopes the durable memory correctly
+- Multiple profiles sharing one daemon are scoped correctly by userId
 
 ---
 
@@ -235,20 +266,24 @@ The `_GrpcChannel` class manages the connection to `libravdbd`:
 
 ```
 endpoint resolution:
-  config "auto"  →  LIBRAVDB_GRPC_ENDPOINT env var  →  unix:$HOME/.libravdbd/run/libravdb.sock
+  config "auto"  →  LIBRAVDB_GRPC_ENDPOINT env var  →  probe standard paths
+  macOS/Linux default: unix:$HOME/.libravdbd/run/libravdb.sock
+  Homebrew: unix:/opt/homebrew/var/libravdbd/run/libravdb.sock
 
 channel creation:
   unix:...  →  grpc.insecure_channel(target)
   tcp:...   →  grpc.insecure_channel(target) if host is loopback
-  otherwise →  grpc.ssl_channel_credentials()
+  otherwise →  grpc.ssl_channel_credentials() with optional mTLS
 
 nonce auth:
   _NonceState holds secret + current nonce
-  build_metadata(method) → [("x-libravdb-auth", hmac-sha256), ("x-libravdb-nonce", nonce)]
+  Auto-bootstraps via Health RPC on first authenticated call
+  HMAC-SHA256 signing with x-libravdb-auth + x-libravdb-nonce metadata
   _rpc_lock serializes all non-Health RPCs through the mutex
+  Auto-recovers: on RPC failure, clears nonce and re-bootstraps
 ```
 
-The channel is created lazily on first RPC call via `_get_stub()`. The `_rpc_lock` ensures thread-safe access to the shared gRPC stub.
+The channel is created lazily on first RPC call. The `_rpc_lock` ensures thread-safe access.
 
 ---
 
@@ -257,9 +292,21 @@ The channel is created lazily on first RPC call via `_get_stub()`. The `_rpc_loc
 The plugin registers CLI commands via `cli.py` with `register_cli(subparser)`:
 
 ```bash
-hermes libravdb status     # daemon health, turn/memory counts
-hermes libravdb health    # quick liveness check
-hermes libravdb search "query"  # semantic search from CLI
+hermes libravdb status            # daemon health, collection counts
+hermes libravdb status --index --force  # rebuild index then status
+hermes libravdb health            # quick liveness check
+hermes libravdb search "query"    # semantic search from CLI
+hermes libravdb index --user-id X --force  # standalone index rebuild
+hermes libravdb flush --user-id X # wipe user namespace
+hermes libravdb export --user-id X  # NDJSON memory export
+hermes libravdb journal --session-id X  # lifecycle journal
+hermes libravdb markdown-ingest   # trigger markdown directory scan
 ```
 
-CLI commands only appear when `libravdb` is the active memory provider. The CLI is discovered via the memory plugin CLI convention — no entry point needed.
+CLI commands only appear when `libravdb` is the active memory provider.
+
+---
+
+## 8. Markdown Ingestion (Optional)
+
+When `markdownIngestionEnabled` is set in config, the plugin continuously monitors configured directory roots for markdown files. Files are parsed, hashed (FNV-1a 64-bit), chunked, and ingested as searchable documents. The system uses polling-based directory watchers, debounce scheduling, and WAL capacity back-pressure gates to integrate with the daemon without overwhelming it.
