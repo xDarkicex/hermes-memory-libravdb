@@ -46,6 +46,8 @@ A stable identity for cross-session durable memory. When set, memories are store
 }
 ```
 
+`userId` must be a valid LibraVDB collection name segment: start with a letter, and use only letters, numbers, `_`, `.`, `:`, `@`, `#`, or `-`. Invalid configured or persisted identities now put the provider into degraded mode until the value is fixed. If you previously used a value with spaces or a leading digit, migrate it to a valid form, for example `alice-work` instead of `alice work` or `u-123alice` instead of `123alice`.
+
 ---
 
 ### topK

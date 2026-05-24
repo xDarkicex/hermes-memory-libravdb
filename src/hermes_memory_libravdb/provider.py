@@ -441,11 +441,16 @@ class LibraVDBMemoryProvider(MemoryProvider):
         self._session_key = session_id
         # Resolve identity: explicit user_id arg wins, else auto-derive
         explicit_user_id = str(kwargs.get("user_id") or "").strip() or None
-        self._resolved_identity = resolve_identity(
-            config={"userId": explicit_user_id} if explicit_user_id else self._config,
-            hermes_home=self._hermes_home,
-            session_key=session_id,
-        )
+        try:
+            self._resolved_identity = resolve_identity(
+                config={"userId": explicit_user_id} if explicit_user_id else self._config,
+                hermes_home=self._hermes_home,
+                session_key=session_id,
+            )
+        except Exception as exc:
+            self._startup_error = f"Invalid LibraVDB identity config: {exc}"
+            self._channel = None
+            return
         self._writes_enabled = str(kwargs.get("agent_context") or "primary") == "primary"
         self._startup_error = None
 
