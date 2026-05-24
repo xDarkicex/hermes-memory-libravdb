@@ -114,6 +114,33 @@ class TestAuthSecretLoading:
             _load_secret()
 
 
+class TestTLSCredentialLoading:
+    def test_missing_configured_tls_ca_fails_closed(self, tmp_path):
+        channel = _GrpcChannel(
+            endpoint="tcp:remote.example:443",
+            secret=None,
+            tls_ca_path=str(tmp_path / "missing-ca.pem"),
+        )
+
+        with pytest.raises(RuntimeError, match="grpcEndpointTlsCa"):
+            channel._create_channel()
+
+    def test_empty_configured_tls_client_key_fails_closed(self, tmp_path):
+        cert = tmp_path / "client.crt"
+        key = tmp_path / "client.key"
+        cert.write_text("cert")
+        key.write_text("")
+        channel = _GrpcChannel(
+            endpoint="tcp:remote.example:443",
+            secret=None,
+            tls_client_cert_path=str(cert),
+            tls_client_key_path=str(key),
+        )
+
+        with pytest.raises(RuntimeError, match="grpcEndpointTlsClientKey"):
+            channel._create_channel()
+
+
 class TestSyncTurnReturnsImmediately:
     def test_sync_turn_returns_immediately(self):
         """sync_turn() must return without waiting for the ingest RPC to complete."""
@@ -152,6 +179,7 @@ class TestSyncTurnReturnsImmediately:
         provider.sync_turn("hello", "hi")
 
         provider._channel._call.assert_not_called()
+# resolved
 
 
 
