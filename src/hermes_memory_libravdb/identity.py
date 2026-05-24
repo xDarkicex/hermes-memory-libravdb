@@ -45,6 +45,8 @@ def _derive_auto_id(parts: dict[str, str]) -> str:
 
 
 def _sanitize_identity_part(value: str, *, fallback: str) -> str:
+    # Trim punctuation at the edges so auto-derived IDs pass collection-name validation.
+    # The home hash suffix in the final ID keeps rare sanitized-name collisions isolated.
     sanitized = "".join(
         ch if ch.isalnum() or ch in "_.:@#-" else "-"
         for ch in str(value or "").strip()
