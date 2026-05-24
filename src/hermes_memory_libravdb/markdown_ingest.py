@@ -294,6 +294,14 @@ def _stream_read_file_with_hash(file_path: str, max_bytes: int) -> dict | str | 
         fh.close()
 
 
+def _is_path_within_root(path: str, root: str) -> bool:
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 # ── Markdown ingest queue (chunked REPLACE/APPEND) ───────────────────────────
 
 
@@ -1114,6 +1122,8 @@ class DirectorySourceAdapter:
         for entry in entries:
             if self._is_stopping:
                 return
+            if entry.is_symlink():
+                continue
             if entry.is_dir():
                 self._walk_directory(root, str(entry), current_files, stats, candidates)
                 continue
@@ -1219,6 +1229,9 @@ class DirectorySourceAdapter:
 
         Returns 'ingested', 'unchanged', 'deleted', or 'skipped'.
         """
+        if Path(file_path).is_symlink() or not _is_path_within_root(file_path, root):
+            return "skipped"
+
         relative_path = str(Path(file_path).relative_to(root)).replace(os.sep, "/")
         source_doc = file_path
 
