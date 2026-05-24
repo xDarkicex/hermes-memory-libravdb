@@ -2,12 +2,15 @@ import json
 import time
 from unittest.mock import MagicMock
 
+import pytest
+
 from libravdb.ipc.v1 import rpc_pb2 as pb
 
 from hermes_memory_libravdb.provider import (
     _NonceState,
     _GrpcChannel,
     _resolve_transport_config,
+    _load_secret,
     LibraVDBMemoryProvider,
 )
 from hermes_memory_libravdb import _LibraVDBContextEngine, _format_predictive_context
@@ -91,6 +94,24 @@ class TestTransportConfig:
         transport = _resolve_transport_config({"endpoint": "tcp:127.0.0.1:37421"})
 
         assert transport["endpoint"] == "tcp:secure.example:443"
+
+
+class TestAuthSecretLoading:
+    def test_missing_secret_file_fails_closed(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("LIBRAVDB_AUTH_SECRET", raising=False)
+        monkeypatch.setenv("LIBRAVDB_AUTH_SECRET_FILE", str(tmp_path / "missing"))
+
+        with pytest.raises(RuntimeError, match="Unable to read LIBRAVDB_AUTH_SECRET_FILE"):
+            _load_secret()
+
+    def test_empty_secret_file_fails_closed(self, monkeypatch, tmp_path):
+        secret_file = tmp_path / "secret"
+        secret_file.write_text("")
+        monkeypatch.delenv("LIBRAVDB_AUTH_SECRET", raising=False)
+        monkeypatch.setenv("LIBRAVDB_AUTH_SECRET_FILE", str(secret_file))
+
+        with pytest.raises(RuntimeError, match="is empty"):
+            _load_secret()
 
 
 class TestSyncTurnReturnsImmediately:
