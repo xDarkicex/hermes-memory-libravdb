@@ -260,3 +260,13 @@ class TestProfileConfigIsolation:
         assert provider._hermes_home == profile_home
         assert provider.user_id == "profile-user"
         assert provider._top_k == 3
+class TestConfigLoading:
+    def test_invalid_config_sets_startup_error_and_disables_channel(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "libravdb.json").write_text("{not json")
+
+        provider = LibraVDBMemoryProvider()
+        provider.initialize("session-1")
+
+        assert "Unable to load LibraVDB config" in provider.system_prompt_block()
+        assert provider._channel is None
