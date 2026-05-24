@@ -3,7 +3,12 @@ from unittest.mock import MagicMock
 
 from libravdb.ipc.v1 import rpc_pb2 as pb
 
-from hermes_memory_libravdb.provider import _NonceState, _GrpcChannel, LibraVDBMemoryProvider
+from hermes_memory_libravdb.provider import (
+    _NonceState,
+    _GrpcChannel,
+    _resolve_transport_config,
+    LibraVDBMemoryProvider,
+)
 from hermes_memory_libravdb import _LibraVDBContextEngine, _format_predictive_context
 
 
@@ -76,6 +81,15 @@ class TestHealthNonceExtraction:
         assert ("x-libravdb-nonce", "nonce-1") in metadata
         assert any(key == "x-libravdb-auth" for key, _ in metadata)
         assert channel._nonce_state.get_nonce() == "nonce-2"
+
+
+class TestTransportConfig:
+    def test_env_endpoint_overrides_config_endpoint(self, monkeypatch):
+        monkeypatch.setenv("LIBRAVDB_GRPC_ENDPOINT", "tcp:secure.example:443")
+
+        transport = _resolve_transport_config({"endpoint": "tcp:127.0.0.1:37421"})
+
+        assert transport["endpoint"] == "tcp:secure.example:443"
 
 
 class TestSyncTurnReturnsImmediately:
