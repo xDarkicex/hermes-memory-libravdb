@@ -34,6 +34,10 @@ DEFAULT_TOP_K = 8
 DEFAULT_MIN_SCORE = 0.35
 DEFAULT_RPC_TIMEOUT_MS = 30000
 STATUS_CACHE_TTL_SEC = 30
+RUNTIME_ONLY_CONFIG_KEYS = frozenset({
+    "LIBRAVDB_AUTH_SECRET",
+    "LIBRAVDB_AUTH_SECRET_FILE",
+})
 
 # Ingest queue defaults
 _INGEST_CHUNK_TOKENS = 8192
@@ -1015,7 +1019,12 @@ class LibraVDBMemoryProvider(MemoryProvider):
         home = Path(hermes_home)
         path = home / "libravdb.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(values, indent=2) + "\n")
+        persisted = {
+            key: value
+            for key, value in values.items()
+            if key not in RUNTIME_ONLY_CONFIG_KEYS
+        }
+        path.write_text(json.dumps(persisted, indent=2) + "\n")
 
     def _format_prefetch_from_results(self, results) -> str:
         if not results:

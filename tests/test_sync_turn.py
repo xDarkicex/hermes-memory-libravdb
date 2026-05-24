@@ -1,3 +1,4 @@
+import json
 import time
 from unittest.mock import MagicMock
 
@@ -176,3 +177,21 @@ class TestPromptInjectionFormatting:
         assert "</predictive_context>" in formatted
         assert "&lt;/predictive_context&gt;" in formatted
         assert "untrusted data" in formatted
+
+
+class TestSaveConfig:
+    def test_save_config_does_not_persist_runtime_auth_secret(self, tmp_path):
+        provider = LibraVDBMemoryProvider()
+
+        provider.save_config(
+            {
+                "endpoint": "auto",
+                "userId": "alice",
+                "LIBRAVDB_AUTH_SECRET": "super-secret",
+                "LIBRAVDB_AUTH_SECRET_FILE": "/tmp/secret",
+            },
+            str(tmp_path),
+        )
+
+        saved = json.loads((tmp_path / "libravdb.json").read_text())
+        assert saved == {"endpoint": "auto", "userId": "alice"}
