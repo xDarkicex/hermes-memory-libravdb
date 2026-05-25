@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-memory-libravdb"
-version = "0.6.2"
+version = "0.6.3"
 description = "Native LibraVDB memory provider for Hermes Agent using real gRPC"
 requires-python = ">=3.9"
 dependencies = [
