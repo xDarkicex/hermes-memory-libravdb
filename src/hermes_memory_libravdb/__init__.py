@@ -678,13 +678,29 @@ class _LibraVDBContextEngine(ContextEngine):
         return result
 
     def compact(self) -> None:
-        """Trigger session compaction via CompactSession."""
+        """Trigger session compaction via CompactSession.
+
+        Short-circuits without acquiring a daemon client when the current
+        context is below the compaction threshold — matching the OpenClaw
+        plugin's below-threshold early exit (v1.6.19).
+        """
         from libravdb.ipc.v1 import rpc_pb2 as pb
 
         session_id, _ = self._resolve_session()
         cfg = self._provider._config
 
         if not self._provider._channel:
+            return
+
+        if (
+            self.threshold_tokens > 0
+            and self.context_length > 0
+            and self.context_length < self.threshold_tokens
+        ):
+            logger.debug(
+                "LibraVDB compact: below threshold (%d < %d) — skipping without client",
+                self.context_length, self.threshold_tokens,
+            )
             return
 
         try:
