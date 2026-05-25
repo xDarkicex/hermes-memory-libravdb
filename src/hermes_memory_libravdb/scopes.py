@@ -61,19 +61,16 @@ def session_collection(session_id: str) -> str:
     sid = session_id.strip()
     if not sid:
         raise ValueError("session_id must be non-empty")
-    validate_collection_name(sid)
     return validate_collection_name(f"{SESSION_COLLECTION_PREFIX}{sid}")
 
 
 def _session_summary_collection(session_id: str) -> str:
     sid = session_id.strip()
-    validate_collection_name(sid)
     return validate_collection_name(f"{SESSION_SUMMARY_PREFIX}{sid}")
 
 
 def _session_recall_collection(session_id: str) -> str:
     sid = session_id.strip()
-    validate_collection_name(sid)
     return validate_collection_name(f"{SESSION_RECALL_PREFIX}{sid}")
 
 
