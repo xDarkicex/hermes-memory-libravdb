@@ -553,7 +553,7 @@ class LibraVDBMemoryProvider(MemoryProvider):
             self._recovery_floor_score = cfg.get("recoveryFloorScore", 0.55)
             self._recovery_min_top_k = int(cfg.get("recoveryMinTopK", 3))
             self._recovery_min_confidence_mean = cfg.get("recoveryMinConfidenceMean", 0.25)
-            self._embedding_backend = cfg.get("embeddingBackend")
+            self._embedding_backend = cfg.get("embeddingBackend", "gguf")
             self._embedding_runtime_path = cfg.get("embeddingRuntimePath")
             self._embedding_model_path = cfg.get("embeddingModelPath")
             self._embedding_tokenizer_path = cfg.get("embeddingTokenizerPath")
@@ -1038,6 +1038,11 @@ class LibraVDBMemoryProvider(MemoryProvider):
                 "key": "endpoint",
                 "description": "LibraVDB gRPC endpoint (`auto`, `unix:/path`, or `tcp:host:port`)",
                 "default": "auto",
+            },
+            {
+                "key": "embeddingBackend",
+                "description": "Embedding backend for the daemon vector service (gguf, bundled, onnx-local, custom-local, remote)",
+                "default": "gguf",
             },
             {
                 "key": "LIBRAVDB_AUTH_SECRET",
