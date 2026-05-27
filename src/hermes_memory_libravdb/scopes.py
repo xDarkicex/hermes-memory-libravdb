@@ -6,6 +6,7 @@ from typing import Literal
 __all__ = [
     "validate_collection_name",
     "user_collection",
+    "profile_collection",
     "session_collection",
     "resolve_search_scopes",
     "resolve_exact_recall_collections",
@@ -13,6 +14,7 @@ __all__ = [
     "CollectionScope",
     "SEARCH_SCOPES_ALL",
     "USER_COLLECTION_PREFIX",
+    "PROFILE_COLLECTION_PREFIX",
     "SESSION_KEY_PREFIX",
     "AGENT_ID_PREFIX",
 ]
@@ -21,6 +23,7 @@ __all__ = [
 _COLLECTION_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_.:@#-]{0,127}$")
 
 USER_COLLECTION_PREFIX = "user:"
+PROFILE_COLLECTION_PREFIX = "profile:"
 SESSION_COLLECTION_PREFIX = "session:"
 SESSION_SUMMARY_PREFIX = "session_summary:"
 SESSION_RECALL_PREFIX = "session_recall:"
@@ -32,9 +35,10 @@ RESERVED_NAMESPACE_PREFIXES = (
     SESSION_KEY_PREFIX,
     AGENT_ID_PREFIX,
     USER_COLLECTION_PREFIX,
+    PROFILE_COLLECTION_PREFIX,
 )
 
-CollectionScope = Literal["session", "user", "global"]
+CollectionScope = Literal["session", "profile", "user", "global"]
 
 
 def validate_collection_name(name: str) -> str:
@@ -54,6 +58,19 @@ def user_collection(user_id: str) -> str:
         raise ValueError("user_id must be non-empty")
     validate_collection_name(namespace)
     return validate_collection_name(f"{USER_COLLECTION_PREFIX}{namespace}")
+
+
+def profile_collection(profile_name: str) -> str:
+    """Return a validated ``profile:{profileName}`` collection name.
+
+    Profile-scoped collections isolate memory per Hermes agent profile,
+    preventing cross-contamination in multi-agent setups.  Use with
+    ``bank_id_template: \"{profile}\"`` in the libravdb config.
+    """
+    name = profile_name.strip()
+    if not name:
+        raise ValueError("profile_name must be non-empty")
+    return validate_collection_name(f"{PROFILE_COLLECTION_PREFIX}{name}")
 
 
 def session_collection(session_id: str) -> str:
@@ -78,6 +95,7 @@ def resolve_search_scopes(
     user_id: str,
     session_id: str | None = None,
     *,
+    profile_name: str | None = None,
     cross_session_recall: bool = True,
     use_session_summary_search: bool = False,
     use_session_recall_projection: bool = False,
@@ -85,8 +103,9 @@ def resolve_search_scopes(
     """
     Return an ordered list of collection names for a memory search.
 
-    Session-scoped collections come first (most relevant), followed by durable
-    user memory and global.  When *cross_session_recall* is False only the
+    Session-scoped collections come first (most relevant), followed by
+    profile-scoped durable memory (if configured), then durable user
+    memory and global.  When *cross_session_recall* is False only the
     session collection is returned.
     """
     collections: list[str] = []
@@ -100,6 +119,8 @@ def resolve_search_scopes(
             collections.append(session_collection(session_id))
 
     if cross_session_recall:
+        if profile_name:
+            collections.append(profile_collection(profile_name))
         collections.append(user_collection(user_id))
         collections.append(GLOBAL_COLLECTION)
 
@@ -109,12 +130,18 @@ def resolve_search_scopes(
 def resolve_exact_recall_collections(
     user_id: str,
     *,
+    profile_name: str | None = None,
     cross_session_recall: bool = True,
 ) -> list[str]:
-    """Return collections for exact recall lookup (user + global only)."""
+    """Return collections for exact recall lookup (profile + user + global)."""
     if not cross_session_recall:
         return []
-    return [user_collection(user_id), GLOBAL_COLLECTION]
+    collections = []
+    if profile_name:
+        collections.append(profile_collection(profile_name))
+    collections.append(user_collection(user_id))
+    collections.append(GLOBAL_COLLECTION)
+    return collections
 
 
 def resolve_durable_namespace(
@@ -160,4 +187,4 @@ def _first_non_empty(value: str | None) -> str | None:
 
 
 # Sentinel for "search all available scopes"
-SEARCH_SCOPES_ALL: tuple[CollectionScope, ...] = ("session", "user", "global")
+SEARCH_SCOPES_ALL: tuple[CollectionScope, ...] = ("session", "profile", "user", "global")

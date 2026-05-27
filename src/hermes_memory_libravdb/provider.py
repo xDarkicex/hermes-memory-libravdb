@@ -410,6 +410,27 @@ class LibraVDBMemoryProvider(MemoryProvider):
         """Resolved stable user identity for collection naming."""
         return self._resolved_identity.user_id if self._resolved_identity else "default"
 
+    def _resolve_profile_name(self, cfg: dict) -> str | None:
+        """Resolve profile name from bank_id_template or env.
+
+        ``bank_id_template: \"{profile}\"`` in libravdb.json expands the
+        ``{profile}`` placeholder to the value of ``HERMES_PROFILE``
+        (the active Hermes profile name).  Returns None when no template
+        is configured or the env var is unset/empty.
+        """
+        template = cfg.get("bank_id_template")
+        if not template or not isinstance(template, str):
+            return None
+        if "{profile}" not in template:
+            return None
+        profile = os.environ.get("HERMES_PROFILE", "").strip()
+        if not profile:
+            return None
+        resolved = template.replace("{profile}", profile)
+        if resolved.strip() in ("", "{profile}"):
+            return None
+        return resolved.strip()
+
     # ── daemon status cache ──────────────────────────────────────────────
 
     def _fetch_daemon_status(self) -> dict:
@@ -515,6 +536,8 @@ class LibraVDBMemoryProvider(MemoryProvider):
             self._fallback_profile = cfg.get("fallbackProfile", "bge-small-en-v1.5")
             self._onnx_device = cfg.get("onnxDevice", "cpu")
             self._cross_session_recall = cfg.get("crossSessionRecall", True)
+            self._bank_id_template = cfg.get("bank_id_template")
+            self._profile_name = self._resolve_profile_name(cfg)
             self._use_session_recall_projection = cfg.get("useSessionRecallProjection", False)
             self._use_session_summary_search = cfg.get("useSessionSummarySearchExperiment", False)
             self._session_ttl = cfg.get("sessionTTL")
@@ -629,6 +652,7 @@ class LibraVDBMemoryProvider(MemoryProvider):
             collections = resolve_search_scopes(
                 user_id=self.user_id,
                 session_id=session,
+                profile_name=self._profile_name,
                 cross_session_recall=self._cross_session_recall,
                 use_session_summary_search=self._use_session_summary_search,
                 use_session_recall_projection=self._use_session_recall_projection,
@@ -733,6 +757,7 @@ class LibraVDBMemoryProvider(MemoryProvider):
                 collections = resolve_search_scopes(
                     user_id=self.user_id,
                     session_id=self._session_id,
+                    profile_name=self._profile_name,
                     cross_session_recall=self._cross_session_recall,
                     use_session_summary_search=self._use_session_summary_search,
                     use_session_recall_projection=self._use_session_recall_projection,
@@ -986,6 +1011,7 @@ class LibraVDBMemoryProvider(MemoryProvider):
             collections = resolve_search_scopes(
                 user_id=self.user_id,
                 session_id=session,
+                profile_name=self._profile_name,
                 cross_session_recall=self._cross_session_recall,
                 use_session_summary_search=self._use_session_summary_search,
                 use_session_recall_projection=self._use_session_recall_projection,
