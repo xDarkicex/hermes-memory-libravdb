@@ -718,6 +718,46 @@ class LibraVDBMemoryProvider(MemoryProvider):
                 "description": "Check whether the LibraVDB daemon is reachable and show memory backend health.",
                 "parameters": {"type": "object", "properties": {}, "required": []},
             },
+            {
+                "name": "get_user_card",
+                "description": (
+                    "Retrieve the stored identity card for a given user ID. "
+                    "Returns the full prose card, updated timestamp, and version. "
+                    "Call this BEFORE answering questions about a person's identity, history, or preferences."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "user_id": {"type": "string", "description": "User ID to retrieve the card for."},
+                    },
+                    "required": ["user_id"],
+                },
+            },
+            {
+                "name": "update_user_card",
+                "description": (
+                    "Write or update the identity card for a user. "
+                    "Provide the user ID and a prose description of who they are. "
+                    "The card is merged with any previous version."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "user_id": {"type": "string", "description": "User ID to associate the card with."},
+                        "card": {"type": "string", "description": "Prose description of the user's identity, values, and traits."},
+                    },
+                    "required": ["user_id", "card"],
+                },
+            },
+            {
+                "name": "list_user_cards",
+                "description": (
+                    "List all stored user cards. Returns an array of user IDs with previews, "
+                    "updated timestamps, and version numbers. Call this before get_user_card "
+                    "when you are unsure whether a card exists."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
         ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
@@ -763,6 +803,67 @@ class LibraVDBMemoryProvider(MemoryProvider):
             if tool_name == "libravdb_status":
                 resp = self._channel._call("Status", pb.MemoryStatusRequest())
                 return json.dumps({"ok": resp.ok, "message": resp.message})
+            if tool_name == "get_user_card":
+                user_id = str(args.get("user_id") or "").strip()
+                if not user_id:
+                    return json.dumps({"error": "Missing required argument: user_id"})
+                resp = self._channel._call("GetUserCard", pb.GetUserCardRequest(
+                    user_id=user_id,
+                ))
+                card_json = resp.card_json if hasattr(resp, "card_json") else ""
+                return json.dumps({
+                    "card": card_json or None,
+                    "updatedAt": getattr(resp, "updated_at", None),
+                    "version": getattr(resp, "version", None),
+                })
+            if tool_name == "update_user_card":
+                user_id = str(args.get("user_id") or "").strip()
+                card = str(args.get("card") or "").strip()
+                if not user_id:
+                    return json.dumps({"error": "Missing required argument: user_id"})
+                if not card:
+                    return json.dumps({"error": "Missing required argument: card"})
+                body = json.dumps({"card": card, "updatedAt": int(time.time() * 1000)})
+                resp = self._channel._call("UpsertUserCard", pb.UpsertUserCardRequest(
+                    user_id=user_id,
+                    card_json=body,
+                ))
+                return json.dumps({"ok": getattr(resp, "ok", False)})
+            if tool_name == "list_user_cards":
+                resp = self._channel._call("ListByMeta", pb.ListByMetaRequest(
+                    collection="",
+                    key="type",
+                    value="user_card",
+                ))
+                users = []
+                for r in resp.results:
+                    user_id = ""
+                    preview = ""
+                    updated_at = None
+                    version = None
+                    if hasattr(r, "metadata_json") and r.metadata_json:
+                        try:
+                            meta = json.loads(r.metadata_json)
+                            user_id = meta.get("_user_id", "")
+                            card_json = meta.get("card_json")
+                            if card_json:
+                                try:
+                                    preview = json.loads(card_json).get("card", card_json)
+                                except Exception:
+                                    preview = str(card_json)[:200]
+                            updated_at = meta.get("updated_at")
+                            version = meta.get("version")
+                        except Exception:
+                            pass
+                    if not user_id:
+                        continue
+                    users.append({
+                        "user_id": user_id,
+                        "preview": preview[:200],
+                        "updated_at": updated_at,
+                        "version": version,
+                    })
+                return json.dumps({"users": users, "total": len(users)})
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
         except Exception as exc:
             return json.dumps({"error": str(exc)})
