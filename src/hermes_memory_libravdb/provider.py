@@ -823,7 +823,6 @@ class LibraVDBMemoryProvider(MemoryProvider):
                     return json.dumps({"error": "Missing required argument: user_id"})
                 if not card:
                     return json.dumps({"error": "Missing required argument: card"})
-                import time
                 body = json.dumps({"card": card, "updatedAt": int(time.time() * 1000)})
                 resp = self._channel._call("UpsertUserCard", pb.UpsertUserCardRequest(
                     user_id=user_id,
@@ -842,9 +841,9 @@ class LibraVDBMemoryProvider(MemoryProvider):
                     preview = ""
                     updated_at = None
                     version = None
-                    if hasattr(r, "metadataJson") and r.metadataJson:
+                    if hasattr(r, "metadata_json") and r.metadata_json:
                         try:
-                            meta = json.loads(r.metadataJson)
+                            meta = json.loads(r.metadata_json)
                             user_id = meta.get("_user_id", "")
                             card_json = meta.get("card_json")
                             if card_json:
