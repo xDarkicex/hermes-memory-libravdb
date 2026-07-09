@@ -272,6 +272,7 @@ class _LibraVDBContextEngine(ContextEngine):
         return resolve_search_scopes(
             user_id=self._resolve_user_id(),
             session_id=self._provider._session_id,
+            profile_name=self._provider._profile_name,
             cross_session_recall=self._provider._cross_session_recall,
         )
 
@@ -451,6 +452,7 @@ class _LibraVDBContextEngine(ContextEngine):
 
         collections = resolve_exact_recall_collections(
             user_id=self._resolve_user_id(),
+            profile_name=self._provider._profile_name,
             cross_session_recall=self._provider._cross_session_recall,
         )
         if not collections:
